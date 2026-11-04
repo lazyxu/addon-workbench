@@ -113,30 +113,22 @@ export async function pageOperation(input) {
       items.push({ id, sha, suite, created, state, queued: state === "WORKFLOW_RUN_STATUS_QUEUED" && !hasStarted,
         page: pageNumber });
     }
-    const activeRe = /QUEUED|PENDING|WAITING|IN[_\s-]*PROGRESS|RUNNING|STARTING/i;
-    const activeInJson = rows.some(run => activeRe.test([
-      run?.state?.status, run?.timing?.kind, run?.timing?.text
-    ].filter(Boolean).join(" ")));
+    // The embedded workflow-run JSON is authoritative for each run's state.
+    // Do not scan the entire page for generic "Queued"/"Running" strings:
+    // hidden navigation, unrelated components, and stale timing labels can
+    // otherwise prevent terminal-page detection indefinitely.
     const terminalStatuses = new Set([
       "WORKFLOW_RUN_STATUS_COMPLETED",
       "WORKFLOW_RUN_STATUS_CANCELLED",
       "WORKFLOW_RUN_STATUS_CANCELED"
     ]);
-    const renderedActive = [...doc.querySelectorAll("span, div, time, p, strong, [aria-label], [title]")]
-      .some(node => {
-        const val = String(node.textContent || "").trim();
-        const label = String(node.getAttribute?.("aria-label") || node.getAttribute?.("title") || "").trim();
-        return ((node.childElementCount === 0 && val.length < 40 &&
-          /^(Queued|Pending|Waiting|Running|In[\s-]*progress)$/i.test(val)) ||
-          /^(Queued|Pending|Waiting|Running|In[\s-]*progress)$/i.test(label));
-      });
-    const embeddedActive = /"text"\s*:\s*"(?:Queued|Pending|Waiting|Running|In[\s-]*progress)"/i.test(html);
-    const terminalPage = rows.length === 25 &&
-      rows.every(run => terminalStatuses.has(run?.state?.status)) &&
-      !activeInJson && !renderedActive && !embeddedActive && domIds.size === jsonIds.size;
+    const allRunsTerminal = rows.every(run => terminalStatuses.has(run?.state?.status));
+    const domValidated = domIds.size === jsonIds.size &&
+      [...domIds].every(id => jsonIds.has(id));
+    const terminalPage = rows.length === 25 && allRunsTerminal && domValidated;
     return { page: pageNumber, total: rows.length, items, statuses,
-      terminalPage, lastPage: rows.length < 25, domValidated: domIds.size === jsonIds.size,
-      activeInJson, renderedActive, embeddedActive };
+      terminalPage, lastPage: rows.length < 25, domValidated,
+      allRunsTerminal };
   };
   if (op === "head") return { head: await getHead() };
   if (op === "default-branch") {
