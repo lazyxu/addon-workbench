@@ -14,7 +14,7 @@ const row = (status = 'WORKFLOW_RUN_STATUS_QUEUED', timingText='') => ({
   createdAt: { timestamp:stamp }, state:{status}, timing:{text:timingText,kind:''}
 });
 
-async function withPage({rows = [row()], sha = currentSha, status = 200}, fn) {
+async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200}, fn) {
   const before = {fetch:globalThis.fetch, location:globalThis.location, DOMParser:globalThis.DOMParser};
   let sentCancel = 0;
   const reads = [];
@@ -32,7 +32,8 @@ async function withPage({rows = [row()], sha = currentSha, status = 200}, fn) {
   globalThis.fetch = async (path, options={}) => {
     reads.push({path,options});
     if (path.endsWith('.atom')) return { ok:true, status:200, text:async () => atom(sha) };
-    if (path.includes('/actions/workflows/build.yml?')) return { ok:true, status:200, text:async () => JSON.stringify({rows}) };
+    if (path.includes('/actions/workflows/build.yml?')) return { ok:readStatus === 200, status:readStatus,
+      headers: {get: () => null}, text:async () => JSON.stringify({rows}) };
     if (path.endsWith('/suites/777/cancel')) {
       sentCancel++;
       return { status, text:async() => status === 200 ? '{"message":"successfully requested"}' : 'Unauthorized' };
@@ -66,17 +67,23 @@ test('requests cancellation of revalidated queued old run', async () => withPage
 }));
 
 test('refuses an already-running job', async () => withPage({rows:[row('WORKFLOW_RUN_STATUS_IN_PROGRESS','Running')]}, async ctx => {
-  await assert.rejects(pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate}), /安全停止/);
+  const result = await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError, true);
+  assert.match(result.message, /安全停止/);
   assert.equal(ctx.getSentCancel(), 0);
 }));
 
 test('refuses a changed HEAD', async () => withPage({sha:'c'.repeat(40)}, async ctx => {
-  await assert.rejects(pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate}), /HEAD 已变化/);
+  const result = await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError, true);
+  assert.match(result.message, /HEAD 已变化/);
   assert.equal(ctx.getSentCancel(), 0);
 }));
 
 test('refuses a finished or moved run', async () => withPage({rows:[row('WORKFLOW_RUN_STATUS_COMPLETED')]}, async ctx => {
-  await assert.rejects(pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate}), /安全停止/);
+  const result = await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError, true);
+  assert.match(result.message, /安全停止/);
   assert.equal(ctx.getSentCancel(), 0);
 }));
 
@@ -88,6 +95,30 @@ test('returns authentication failure without success', async () => withPage({sta
 }));
 
 test('rejects foreign repository without network request', async () => withPage({}, async ctx => {
-  await assert.rejects(pageOperation({op:'head',...input,repo:'another'}), /已经切换仓库/);
+  const result = await pageOperation({op:'head',...input,repo:'another'});
+  assert.equal(result.__actionsSweeperError, true);
+  assert.match(result.message, /已经切换仓库/);
   assert.equal(ctx.reads.length, 0);
+}));
+
+
+test('GitHub HTTP 429 returns a serialized, retryable diagnostic without cancellation', async () => withPage({readStatus:429}, async ctx => {
+  const result = await pageOperation({op:'page',...input,page:41});
+  assert.equal(result.__actionsSweeperError, true);
+  assert.equal(result.httpStatus, 429);
+  assert.equal(result.retryable, true);
+  assert.match(result.message, /HTTP 429/);
+  assert.equal(ctx.getSentCancel(), 0);
+}));
+
+test('GitHub HTTP 403 without rate-limit headers is not retried', async () => withPage({readStatus:403}, async () => {
+  const result = await pageOperation({op:'page',...input,page:3});
+  assert.equal(result.httpStatus, 403);
+  assert.equal(result.retryable, false);
+}));
+
+test('HTTP 500 is exposed as retryable page failure', async () => withPage({readStatus:500}, async () => {
+  const result = await pageOperation({op:'page',...input,page:2});
+  assert.equal(result.httpStatus, 500);
+  assert.equal(result.retryable, true);
 }));
