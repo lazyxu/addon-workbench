@@ -14,7 +14,7 @@
         <h1>Actions Sweeper</h1>
         <p>GitHub Actions · 历史排队清理</p>
       </div>
-      <span class="version">v0.1.1</span>
+      <span class="version">v0.1.2</span>
     </header>
 
     <div class="repo" id="repo" aria-live="polite">正在读取当前 GitHub 仓库…</div>
@@ -37,10 +37,10 @@
           </select>
         </label>
         <label><span id="limitLabel">连续终态页数 N</span>
-          <input id="scanLimit" type="number" value="2" min="1" max="100" inputmode="numeric" aria-describedby="limitHint" />
+          <input id="scanLimit" type="number" value="2" min="1" max="40" inputmode="numeric" aria-describedby="limitHint" />
         </label>
       </div>
-      <p class="hint" id="limitHint">快速扫描：连续 N 个完整终态页就停止（默认 N=2）；额外有 100 页安全上限。完整扫描默认最多 20 页。</p>
+      <p class="hint" id="limitHint">快速扫描：连续 N 页终态提前停止（默认 N=2）；完整扫描默认最多 20 页。GitHub 一次筛选查询最多读取 1,000 条（40 页），到达上限会保留已有结果并提示未覆盖更早记录。</p>
       <p class="hint">仅筛选目标工作流、目标分支；保护当前 HEAD 和最近一次旧 Run。</p>
       <button type="button" id="scan" class="button primary">扫描旧 CI</button>
     </section>
