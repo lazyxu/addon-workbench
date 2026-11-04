@@ -149,7 +149,7 @@ export async function pageOperation(input) {
     ];
     return { branch: candidates.find(x => x && !/[\s<>]/.test(x)) || null };
   }
-  if (op === "page") return parsePage(page);
+  if (op === "page") return await parsePage(page);
   if (op === "cancel-one") {
     if (!candidate || !Number.isSafeInteger(candidate.id) || candidate.id <= 0 ||
         !/^\d+$/.test(String(candidate.suite || "")) ||
