@@ -1,0 +1,44 @@
+name: Package extensions
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package Chrome extensions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run safety and packaging tests
+        run: npm test
+      - name: Create installable extension ZIPs
+        run: npm run package
+      - name: Verify ZIP archives
+        shell: bash
+        run: |
+          shopt -s nullglob
+          archives=(dist/*.zip)
+          if ((${#archives[@]} == 0)); then
+            echo 'No extension archives were produced' >&2
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            unzip -t "$archive"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chrome-extensions-${{ github.sha }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
