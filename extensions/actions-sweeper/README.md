@@ -2,13 +2,13 @@
 
 **Standalone GitHub Actions queue cleaner for Chrome / Edge.** No repository, service, or account is hard-coded.
 
-Open any `github.com/OWNER/REPO` page and click the browser toolbar button. Supply a workflow file (`ci.yml`, `build.yaml`, etc.) and branch (`main`, `master`, or another). Both can be inferred when a workflow page is open. Click **Scan** to preview candidates. **Dry Run** starts enabled; to actually cancel, uncheck it, select runs, and enter the repository name to confirm.
+Open any `github.com/OWNER/REPO` page and click the browser toolbar button. The workflow is prefilled with `ci.yml` (or inferred from the current workflow page). The branch is initially `master` and automatically updated to the repository default branch (`main`, `master`, etc.) when detectable. Verify the fallback if detection is unavailable. Click **Scan** to preview candidates. **Dry Run** starts enabled; to actually cancel, uncheck it, select runs, and enter the repository name to confirm.
 
 ## Safety rules
 
 - Only queued runs from the exact workflow/branch are eligible; runs that have started, completed or been cancelled are excluded.
 - Current HEAD's runs are never selected; the newest older run in the scanned set is protected.
-- Fast mode stops after **two consecutive fully terminal pages** and warns that older queued jobs might remain. Full mode stops at the last page or a configurable limit (default 20; maximum 100). Reaching the limit is not proof of completeness.
+- Fast mode stops after **N consecutive fully terminal pages** (N defaults to **2**, configurable 1–100), with a separate hard safety cap of 100 scanned pages. Full mode scans until the last page or its **maximum scanned pages** limit (default **20**, configurable 1–100). Switching modes retains separate input values. Fast stopping or reaching a cap does not prove complete coverage.
 - Branch/head SHA, page-data consistency, run ID, suite, workflow and queued status are checked again before every cancel request. If a run moves pages or changes state, processing stops.
 - At most 250 requests per batch, 600 ms pacing, and early stop on authorization/rate-limit failures. A short operation history is stored only in browser local storage.
 - No PR runs from other branches, running jobs, or completed jobs are cancelled; no branches are deleted.
