@@ -1,10 +1,11 @@
 import { chooseRuns, gitHubContext, normalizeWorkflow, normalizeBranch } from "./selection.js";
 import { pageOperation } from "./page-operations.js";
+import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, scanStopDecision } from "./scan-policy.js";
 
 (function initializePopup() {
   const $ = id => document.getElementById(id);
   const ui = Object.fromEntries([
-    "repo", "unsupported", "tool", "workflow", "branch", "mode", "maxPages", "scan", "progress",
+    "repo", "unsupported", "tool", "workflow", "branch", "mode", "scanLimit", "limitLabel", "limitHint", "scan", "progress",
     "results", "statRuns", "statOld", "statQueued", "protectedInfo", "coverageInfo",
     "candidateList", "selectAll", "dryRun", "cancel", "stop", "confirmation", "repoConfirmLabel",
     "repoConfirmInput", "confirmCancel", "dismissConfirm", "showHistory", "historyPanel"
@@ -16,6 +17,21 @@ import { pageOperation } from "./page-operations.js";
   let stopRequested = false;
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   const MAX_BATCH = 250;
+  const savedLimits = { fast: DEFAULT_FAST_TERMINAL_PAGES, full: DEFAULT_FULL_MAX_PAGES };
+  let previousMode = "fast";
+  let branchEdited = false;
+
+  function updateModeUI() {
+    const mode = ui.mode.value;
+    savedLimits[previousMode] = ui.scanLimit.value;
+    ui.scanLimit.value = savedLimits[mode];
+    ui.limitLabel.textContent = mode === "fast" ? "连续终态页数 N" : "最多扫描页数";
+    ui.limitHint.textContent = mode === "fast" ?
+      "快速扫描：连续 N 页全部终态即停止，默认 N=2；额外设有 100 页安全上限。" :
+      "完整扫描：扫描到末页或设置上限，默认最多 20 页；达到上限不代表扫完。";
+    previousMode = mode;
+    resetResults();
+  }
 
   function status(message, error = false) {
     ui.progress.textContent = message;
@@ -29,7 +45,7 @@ import { pageOperation } from "./page-operations.js";
     ui.workflow.disabled = next;
     ui.branch.disabled = next;
     ui.mode.disabled = next;
-    ui.maxPages.disabled = next;
+    ui.scanLimit.disabled = next;
     ui.selectAll.disabled = next;
     ui.dryRun.disabled = next;
     ui.stop.hidden = !next;
@@ -45,11 +61,8 @@ import { pageOperation } from "./page-operations.js";
   function getSettings() {
     const workflow = normalizeWorkflow(ui.workflow.value);
     const branch = normalizeBranch(ui.branch.value);
-    const maxPages = Number(ui.maxPages.value);
-    if (!Number.isSafeInteger(maxPages) || maxPages < 1 || maxPages > 100) {
-      throw new Error("最大页数必须介于 1–100");
-    }
-    return { ...context, workflow, branch, maxPages, mode: ui.mode.value };
+    const limit = scanLimitForMode(ui.mode.value, ui.scanLimit.value);
+    return { ...context, workflow, branch, ...limit, mode: ui.mode.value };
   }
   async function requestPage(details) {
     const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -117,11 +130,13 @@ import { pageOperation } from "./page-operations.js";
       const all = [];
       const seen = new Set();
       let terminals = 0;
-      let reason = "达到页数限制，可能还有更早的任务";
+      let reason = "尚未完成扫描";
       let pageCount = 0;
       for (let page = 1; page <= settings.maxPages; page++) {
         if (stopRequested) throw new Error("扫描已手动停止（没有执行取消操作）");
-        status(`扫描 ${settings.owner}/${settings.repo} · ${settings.workflow} · ${settings.branch}\n第 ${page}/${settings.maxPages} 页…`);
+        status(`扫描 ${settings.owner}/${settings.repo} · ${settings.workflow} · ${settings.branch}\n` +
+          (settings.mode === "fast" ? `第 ${page} 页 · 连续终态 ${terminals}/${settings.terminalPages}` :
+            `第 ${page}/${settings.maxPages} 页`) + "…");
         const result = await requestPage({ op: "page", ...settings, page });
         pageCount = page;
         const fingerprint = result.items.map(row => row.id).join(",");
@@ -131,11 +146,8 @@ import { pageOperation } from "./page-operations.js";
         seen.add(fingerprint);
         all.push(...result.items);
         terminals = result.terminalPage ? terminals + 1 : 0;
-        if (result.lastPage) { reason = "到达最后一页"; break; }
-        if (settings.mode === "fast" && terminals >= 2) {
-          reason = "连续两页终态；可能遗漏更早的排队任务";
-          break;
-        }
+        const decision = scanStopDecision({ ...settings, page, consecutiveTerminalPages: terminals, lastPage: result.lastPage });
+        if (decision.done) { reason = decision.reason; break; }
       }
       if (!all.length) throw new Error("没有找到符合筛选条件的工作流 Run");
       const selection = chooseRuns(all, head);
@@ -209,7 +221,10 @@ import { pageOperation } from "./page-operations.js";
   }
 
   ui.scan.addEventListener("click", scan);
-  for (const elem of [ui.workflow, ui.branch, ui.mode, ui.maxPages]) elem.addEventListener("input", resetResults);
+  for (const elem of [ui.workflow, ui.branch, ui.scanLimit]) elem.addEventListener("input", resetResults);
+  ui.branch.addEventListener("input", () => { branchEdited = true; });
+  ui.scanLimit.addEventListener("input", () => { savedLimits[ui.mode.value] = ui.scanLimit.value; });
+  ui.mode.addEventListener("change", updateModeUI);
   ui.selectAll.addEventListener("click", () => {
     const checkboxes = [...ui.candidateList.querySelectorAll('input[type="checkbox"]')];
     const newValue = !checkboxes.every(node => node.checked);
@@ -254,16 +269,23 @@ import { pageOperation } from "./page-operations.js";
       if (!context) throw new Error("请先打开 https://github.com/组织/仓库");
       tabId = tab.id;
       ui.repo.textContent = `${context.owner}/${context.repo}`;
-      ui.workflow.value = context.workflow || "";
-      ui.branch.value = context.branch || "";
+      ui.workflow.value = context.workflow || "ci.yml";
+      ui.branch.value = context.branch || "master";
       if (!context.branch) {
+        ui.scan.disabled = true;
         try {
-          const branch = await requestPage({ op: "default-branch", ...context });
-          if (!ui.branch.value && branch.branch) ui.branch.value = branch.branch;
-        } catch { /* GitHub HTML differs or private repo; explicit input remains available */ }
+          const result = await requestPage({ op: "default-branch", ...context });
+          if (!branchEdited && result.branch) ui.branch.value = result.branch;
+          status(result.branch ? "已识别仓库默认分支，可以扫描。" :
+            "默认填写 master；未识别仓库默认分支，请确认后扫描。");
+        } catch {
+          status("默认填写 master；未能读取仓库默认分支，请确认后扫描。");
+        } finally {
+          ui.scan.disabled = false;
+        }
+      } else {
+        status("已识别当前 GitHub 工作流及筛选分支，可以扫描。");
       }
-      status(context.workflow ? "已识别当前工作流；点击扫描。" :
-        "请填写工作流文件名（例如 ci.yml），然后点击扫描。若分支为空，也请填写。");
     } catch (error) {
       ui.repo.textContent = "未选择 GitHub 仓库";
       ui.tool.hidden = true;
