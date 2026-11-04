@@ -23,12 +23,12 @@ test('fast respects configurable N consecutive terminal pages', () => {
 
 test('fast resets streak on active page and reports safety cap', () => {
   assert.equal(check('fast', 4, 0, 2, 100).done, false);
-  assert.match(check('fast', 100, 0, 2, 100).reason, /安全上限/);
+  assert.match(check('fast', 40, 0, 2, 40).reason, /GitHub 单次查询上限/);
 });
 
 test('full ignores terminal streak, stops on configured limit or last page', () => {
   assert.equal(check('full', 2, 2, null, 20).done, false);
-  assert.match(check('full', 20, 20, null, 20).reason, /完整扫描上限 20/);
+  assert.match(check('full', 20, 20, null, 20).reason, /完整扫描设定上限 20/);
   assert.equal(check('full', 11, 1, null, 20, true).reason, '到达最后一页');
 });
 
