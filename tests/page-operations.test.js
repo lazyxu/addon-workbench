@@ -14,7 +14,7 @@ const row = (status = 'WORKFLOW_RUN_STATUS_QUEUED', timingText='') => ({
   createdAt: { timestamp:stamp }, state:{status}, timing:{text:timingText,kind:''}
 });
 
-async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200}, fn) {
+async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200, unrelatedQueuedText = false}, fn) {
   const before = {fetch:globalThis.fetch, location:globalThis.location, DOMParser:globalThis.DOMParser};
   let sentCancel = 0;
   const reads = [];
@@ -25,6 +25,7 @@ async function withPage({rows = [row()], sha = currentSha, status = 200, readSta
       return {querySelectorAll(selector) {
         if (selector === 'script[type="application/json"]') return [{textContent:JSON.stringify({workflowRunsRoute:{workflowRuns:rows}})}];
         if (selector === 'a[href*="/actions/runs/"]') return rows.map(r => ({getAttribute:() => '/example/repository/actions/runs/' + r.id}));
+        if (unrelatedQueuedText && selector.startsWith("span,")) return [{textContent:"Queued",childElementCount:0,getAttribute:() => null}];
         return [];
       }};
     }
@@ -33,7 +34,7 @@ async function withPage({rows = [row()], sha = currentSha, status = 200, readSta
     reads.push({path,options});
     if (path.endsWith('.atom')) return { ok:true, status:200, text:async () => atom(sha) };
     if (path.includes('/actions/workflows/build.yml?')) return { ok:readStatus === 200, status:readStatus,
-      headers: {get: () => null}, text:async () => JSON.stringify({rows}) };
+      headers: {get: () => null}, text:async () => JSON.stringify({rows, unrelatedComponent: unrelatedQueuedText ? {text:"Queued"} : null}) };
     if (path.endsWith('/suites/777/cancel')) {
       sentCancel++;
       return { status, text:async() => status === 200 ? '{"message":"successfully requested"}' : 'Unauthorized' };
@@ -121,4 +122,25 @@ test('HTTP 500 is exposed as retryable page failure', async () => withPage({read
   const result = await pageOperation({op:'page',...input,page:2});
   assert.equal(result.httpStatus, 500);
   assert.equal(result.retryable, true);
+}));
+
+
+test('terminal page ignores unrelated hidden or embedded Queued text', async () => withPage({
+  rows: Array.from({length:25}, (_, index) => ({...row('WORKFLOW_RUN_STATUS_COMPLETED'), id:1000 + index})),
+  unrelatedQueuedText: true
+}, async ctx => {
+  const page = await pageOperation({op:'page',...input,page:1});
+  assert.equal(page.total, 25);
+  assert.equal(page.allRunsTerminal, true);
+  assert.equal(page.domValidated, true);
+  assert.equal(page.terminalPage, true);
+  assert.equal(ctx.getSentCancel(), 0);
+}));
+
+test('terminal page is not accepted when any listed run is queued', async () => withPage({
+  rows: Array.from({length:25}, (_, index) => ({...row(index === 24 ? 'WORKFLOW_RUN_STATUS_QUEUED' : 'WORKFLOW_RUN_STATUS_COMPLETED'), id:2000 + index}))
+}, async () => {
+  const page = await pageOperation({op:'page',...input,page:1});
+  assert.equal(page.allRunsTerminal, false);
+  assert.equal(page.terminalPage, false);
 }));
