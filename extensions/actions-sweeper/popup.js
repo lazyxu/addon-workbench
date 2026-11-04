@@ -1,6 +1,6 @@
 import { chooseRuns, gitHubContext, normalizeWorkflow, normalizeBranch } from "./selection.js";
 import { pageOperation } from "./page-operations.js";
-import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, scanStopDecision } from "./scan-policy.js";
+import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, scanWorkflowPages } from "./scan-policy.js";
 
 (function initializePopup() {
   const $ = id => document.getElementById(id);
@@ -27,8 +27,8 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     ui.scanLimit.value = savedLimits[mode];
     ui.limitLabel.textContent = mode === "fast" ? "连续终态页数 N" : "最多扫描页数";
     ui.limitHint.textContent = mode === "fast" ?
-      "快速扫描：连续 N 页全部终态即停止，默认 N=2；额外设有 100 页安全上限。" :
-      "完整扫描：扫描到末页或设置上限，默认最多 20 页；达到上限不代表扫完。";
+      "快速扫描：连续 N 页全部终态即停止，默认 N=2；受 GitHub 限制，一次查询最多 40 页。" :
+      "完整扫描：扫描到末页或设置上限，默认最多 20 页；单次查询最多 40 页，达到上限不代表扫完。";
     previousMode = mode;
     resetResults();
   }
@@ -41,7 +41,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
   function switchBusy(next) {
     busy = next;
     ui.scan.disabled = next;
-    ui.cancel.disabled = next || !snapshot?.selection.eligible.length;
+    ui.cancel.disabled = next || !snapshot?.selection.eligible.length || snapshot?.incomplete === true;
     ui.workflow.disabled = next;
     ui.branch.disabled = next;
     ui.mode.disabled = next;
@@ -71,12 +71,28 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     if (!nextContext || nextContext.owner !== context.owner || nextContext.repo !== context.repo) {
       throw new Error("当前 GitHub 仓库已变化，安全停止");
     }
-    const [injection] = await chrome.scripting.executeScript({
-      target: { tabId }, world: "MAIN", func: pageOperation,
-      args: [details]
-    });
-    if (!injection || !injection.result) throw new Error("页面没有返回有效结果");
-    return injection.result;
+    let injection;
+    try {
+      [injection] = await chrome.scripting.executeScript({
+        target: { tabId }, world: "MAIN", func: pageOperation,
+        args: [details]
+      });
+    } catch (error) {
+      throw new Error(`无法向 GitHub 标签页注入脚本：${errorText(error)}`);
+    }
+    const result = injection?.result;
+    if (result?.__actionsSweeperError) {
+      const error = new Error(result.message);
+      error.httpStatus = result.httpStatus;
+      error.retryable = result.retryable;
+      error.retryAfterMs = result.retryAfterMs;
+      throw error;
+    }
+    if (!result || typeof result !== "object") {
+      const label = details.op === "page" ? `第 ${details.page} 页` : details.op;
+      throw new Error(`${label}：GitHub 页面脚本没有返回可用数据，请检查页面控制台或刷新标签页`);
+    }
+    return result;
   }
   function selectedRuns() {
     const ids = new Set([...ui.candidateList.querySelectorAll("input[type=checkbox]:checked")]
@@ -86,8 +102,8 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
   function updateCancelButton() {
     if (!snapshot) return;
     const count = selectedRuns().length;
-    ui.cancel.disabled = busy || count === 0;
-    ui.cancel.textContent = count === 0 ? "没有选中的任务" :
+    ui.cancel.disabled = busy || count === 0 || snapshot.incomplete === true;
+    ui.cancel.textContent = snapshot.incomplete ? "扫描不完整：禁止取消" : count === 0 ? "没有选中的任务" :
       (ui.dryRun.checked ? `预演 ${count} 条取消操作` : `取消选中的 ${count} 条旧 CI`);
   }
   function renderResults() {
@@ -124,39 +140,57 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     try { settings = getSettings(); } catch (error) { status(errorText(error), true); return; }
     switchBusy(true);
     stopRequested = false;
+    let confirmedHead = null;
     try {
       status("正在确认最新分支 SHA…");
       const { head } = await requestPage({ op: "head", ...settings });
-      const all = [];
-      const seen = new Set();
-      let terminals = 0;
-      let reason = "尚未完成扫描";
-      let pageCount = 0;
-      for (let page = 1; page <= settings.maxPages; page++) {
-        if (stopRequested) throw new Error("扫描已手动停止（没有执行取消操作）");
-        status(`扫描 ${settings.owner}/${settings.repo} · ${settings.workflow} · ${settings.branch}\n` +
-          (settings.mode === "fast" ? `第 ${page} 页 · 连续终态 ${terminals}/${settings.terminalPages}` :
-            `第 ${page}/${settings.maxPages} 页`) + "…");
-        const result = await requestPage({ op: "page", ...settings, page });
-        pageCount = page;
-        const fingerprint = result.items.map(row => row.id).join(",");
-        if (seen.has(fingerprint) && !result.lastPage) {
-          throw new Error(`第 ${page} 页出现重复分页，拒绝使用不完整结果`);
+      confirmedHead = head;
+      const fetchWithRetry = async page => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            return await requestPage({ op: "page", ...settings, page });
+          } catch (error) {
+            if (!error.retryable || attempt === 2 || error.retryAfterMs > 12000 || stopRequested) throw error;
+            const wait = Math.max(error.retryAfterMs || 0, 800 * (2 ** attempt));
+            status(`第 ${page} 页暂时无法读取（${errorText(error)}），${wait / 1000} 秒后重试…`);
+            await delay(wait);
+          }
         }
-        seen.add(fingerprint);
-        all.push(...result.items);
-        terminals = result.terminalPage ? terminals + 1 : 0;
-        const decision = scanStopDecision({ ...settings, page, consecutiveTerminalPages: terminals, lastPage: result.lastPage });
-        if (decision.done) { reason = decision.reason; break; }
-      }
-      if (!all.length) throw new Error("没有找到符合筛选条件的工作流 Run");
-      const selection = chooseRuns(all, head);
-      snapshot = { settings, head, selection, pages: pageCount, reason };
+      };
+      const outcome = await scanWorkflowPages(settings, fetchWithRetry, {
+        onProgress: (page, streak) => status(`扫描 ${settings.owner}/${settings.repo} · ${settings.workflow} · ${settings.branch}\n` +
+          (settings.mode === "fast" ? `第 ${page} 页 · 连续终态 ${streak}/${settings.terminalPages}` :
+            `第 ${page}/${settings.maxPages} 页`) + "…"),
+        shouldStop: () => stopRequested,
+        pause: () => delay(250)
+      });
+      if (!outcome.items.length) throw new Error("没有找到符合筛选条件的工作流 Run");
+      const selection = chooseRuns(outcome.items, head);
+      snapshot = { settings, head, selection, pages: outcome.pages, reason: outcome.reason,
+        limited: outcome.limited, incomplete: false };
       renderResults();
-      status(`扫描完成：找到 ${selection.eligible.length} 条可取消的旧排队任务。\n尚未向 GitHub 发送任何取消请求。`);
+      status(`扫描完成：找到 ${selection.eligible.length} 条可取消的旧排队任务。\n${outcome.reason}\n尚未向 GitHub 发送任何取消请求。`);
     } catch (error) {
-      resetResults();
-      status(errorText(error), true);
+      const partial = error.partialScan;
+      if (confirmedHead && partial?.items?.length) {
+        try {
+          snapshot = {
+            settings, head: confirmedHead, selection: chooseRuns(partial.items, confirmedHead),
+            pages: partial.pages, reason: `第 ${error.failedPage} 页扫描失败，结果不完整`,
+            incomplete: true
+          };
+          renderResults();
+          status(`第 ${error.failedPage} 页失败：${errorText(error)}\n已保留前 ${partial.pages} 页的只读预览；为安全起见，禁止从不完整结果执行取消。`, true);
+        } catch (invalidPartial) {
+          snapshot = null;
+          ui.results.hidden = true;
+          status(`扫描失败：${errorText(error)}；部分数据校验失败：${errorText(invalidPartial)}`, true);
+        }
+      } else {
+        snapshot = null;
+        ui.results.hidden = true;
+        status(errorText(error), true);
+      }
     } finally { switchBusy(false); updateCancelButton(); }
   }
   async function saveHistory(item) {
@@ -167,7 +201,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     } catch (error) { console.warn("无法写入本地操作历史", error); }
   }
   async function runCancellation(isDryRun) {
-    if (busy || !snapshot) return;
+    if (busy || !snapshot || snapshot.incomplete) return;
     const runs = selectedRuns();
     if (!runs.length) return;
     if (runs.length > MAX_BATCH) {
@@ -233,7 +267,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
   });
   ui.dryRun.addEventListener("change", () => { ui.confirmation.hidden = true; updateCancelButton(); });
   ui.cancel.addEventListener("click", () => {
-    if (!snapshot || busy || !selectedRuns().length) return;
+    if (!snapshot || snapshot.incomplete || busy || !selectedRuns().length) return;
     if (ui.dryRun.checked) return void runCancellation(true);
     ui.confirmation.hidden = false;
     ui.repoConfirmLabel.textContent = context.repo;
