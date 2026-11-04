@@ -1,5 +1,7 @@
 /** Same-origin page operation, injected from an MV3 extension into the active GitHub tab. */
 export async function pageOperation(input) {
+  // Chrome may discard an injected Promise rejection; always return a serializable error.
+  try {
   const { op, owner, repo, branch, workflow, page = 1, expectedHead, candidate } = input || {};
   if (location.origin !== "https://github.com") throw new Error("仅支持 github.com");
   if (![owner, repo].every(x => typeof x === "string" && /^[a-zA-Z0-9_.-]+$/.test(x))) {
@@ -14,8 +16,24 @@ export async function pageOperation(input) {
   const rootPattern = escapeRegExp(root);
   const read = async path => {
     if (!path.startsWith(root + "/") && path !== root) throw new Error("拒绝跨仓库请求");
-    const response = await fetch(path, { credentials: "same-origin", cache: "no-store" });
-    if (!response.ok) throw new Error(`GitHub 读取失败：HTTP ${response.status} (${path})`);
+    let response;
+    try {
+      response = await fetch(path, { credentials: "same-origin", cache: "no-store" });
+    } catch (cause) {
+      const error = new Error(`GitHub 网络读取失败 (${path}): ${cause?.message || String(cause)}`);
+      error.retryable = true;
+      throw error;
+    }
+    if (!response.ok) {
+      const error = new Error(`GitHub 读取失败：HTTP ${response.status} (${path})`);
+      error.httpStatus = response.status;
+      const retryAfter = Number(response.headers?.get?.("retry-after"));
+      error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : null;
+      error.retryable = [429, 500, 502, 503, 504].includes(response.status) ||
+        (response.status === 403 &&
+         (error.retryAfterMs !== null || response.headers?.get?.("x-ratelimit-remaining") === "0"));
+      throw error;
+    }
     return response.text();
   };
   const checkBranch = () => {
@@ -95,30 +113,22 @@ export async function pageOperation(input) {
       items.push({ id, sha, suite, created, state, queued: state === "WORKFLOW_RUN_STATUS_QUEUED" && !hasStarted,
         page: pageNumber });
     }
-    const activeRe = /QUEUED|PENDING|WAITING|IN[_\s-]*PROGRESS|RUNNING|STARTING/i;
-    const activeInJson = rows.some(run => activeRe.test([
-      run?.state?.status, run?.timing?.kind, run?.timing?.text
-    ].filter(Boolean).join(" ")));
+    // The embedded workflow-run JSON is authoritative for each run's state.
+    // Do not scan the entire page for generic "Queued"/"Running" strings:
+    // hidden navigation, unrelated components, and stale timing labels can
+    // otherwise prevent terminal-page detection indefinitely.
     const terminalStatuses = new Set([
       "WORKFLOW_RUN_STATUS_COMPLETED",
       "WORKFLOW_RUN_STATUS_CANCELLED",
       "WORKFLOW_RUN_STATUS_CANCELED"
     ]);
-    const renderedActive = [...doc.querySelectorAll("span, div, time, p, strong, [aria-label], [title]")]
-      .some(node => {
-        const val = String(node.textContent || "").trim();
-        const label = String(node.getAttribute?.("aria-label") || node.getAttribute?.("title") || "").trim();
-        return ((node.childElementCount === 0 && val.length < 40 &&
-          /^(Queued|Pending|Waiting|Running|In[\s-]*progress)$/i.test(val)) ||
-          /^(Queued|Pending|Waiting|Running|In[\s-]*progress)$/i.test(label));
-      });
-    const embeddedActive = /"text"\s*:\s*"(?:Queued|Pending|Waiting|Running|In[\s-]*progress)"/i.test(html);
-    const terminalPage = rows.length === 25 &&
-      rows.every(run => terminalStatuses.has(run?.state?.status)) &&
-      !activeInJson && !renderedActive && !embeddedActive && domIds.size === jsonIds.size;
+    const allRunsTerminal = rows.every(run => terminalStatuses.has(run?.state?.status));
+    const domValidated = domIds.size === jsonIds.size &&
+      [...domIds].every(id => jsonIds.has(id));
+    const terminalPage = rows.length === 25 && allRunsTerminal && domValidated;
     return { page: pageNumber, total: rows.length, items, statuses,
-      terminalPage, lastPage: rows.length < 25, domValidated: domIds.size === jsonIds.size,
-      activeInJson, renderedActive, embeddedActive };
+      terminalPage, lastPage: rows.length < 25, domValidated,
+      allRunsTerminal };
   };
   if (op === "head") return { head: await getHead() };
   if (op === "default-branch") {
@@ -131,7 +141,7 @@ export async function pageOperation(input) {
     ];
     return { branch: candidates.find(x => x && !/[\s<>]/.test(x)) || null };
   }
-  if (op === "page") return parsePage(page);
+  if (op === "page") return await parsePage(page);
   if (op === "cancel-one") {
     if (!candidate || !Number.isSafeInteger(candidate.id) || candidate.id <= 0 ||
         !/^\d+$/.test(String(candidate.suite || "")) ||
@@ -165,4 +175,13 @@ export async function pageOperation(input) {
       authOrRateLimited: [401, 403, 429].includes(response.status) };
   }
   throw new Error("未知操作类型");
+  } catch (error) {
+    return {
+      __actionsSweeperError: true,
+      message: String(error?.message || error).slice(0, 400),
+      httpStatus: Number.isSafeInteger(error?.httpStatus) ? error.httpStatus : null,
+      retryable: error?.retryable === true,
+      retryAfterMs: Number.isFinite(error?.retryAfterMs) ? error.retryAfterMs : null
+    };
+  }
 }
