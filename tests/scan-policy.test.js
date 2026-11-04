@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, FAST_SCAN_HARD_CAP,
+  GITHUB_FILTERED_RUN_LIMIT, GITHUB_MAX_FILTERED_PAGES, scanWorkflowPages,
   scanLimitForMode, scanStopDecision } from '../extensions/actions-sweeper/scan-policy.js';
 
 const check = (mode, page, streak, terminalPages, maxPages, lastPage = false) =>
@@ -32,9 +33,97 @@ test('full ignores terminal streak, stops on configured limit or last page', () 
 });
 
 test('validates inputs in either mode', () => {
-  for (const bad of ['', 0, -1, 1.1, 101, 'x']) {
+  for (const bad of ['', 0, -1, 1.1, 41, 101, 'x']) {
     assert.throws(() => scanLimitForMode('fast', bad), /页数/);
     assert.throws(() => scanLimitForMode('full', bad), /页数/);
   }
   assert.throws(() => scanLimitForMode('bad', 2), /未知扫描/);
+});
+
+
+const mockPage = (page, opts = {}) => ({
+  items: Array.from({ length: opts.count ?? 25 }, (_, i) => ({ id: (page - 1) * 25 + i + 1 })),
+  terminalPage: Boolean(opts.terminalPage),
+  lastPage: Boolean(opts.lastPage)
+});
+
+test('GitHub filtered query is capped at exactly 40 pages / 1000 runs', async () => {
+  assert.equal(GITHUB_FILTERED_RUN_LIMIT, 1000);
+  assert.equal(GITHUB_MAX_FILTERED_PAGES, 40);
+  const requested = [];
+  const result = await scanWorkflowPages(
+    { mode: 'fast', ...scanLimitForMode('fast', 2) },
+    async page => { requested.push(page); return mockPage(page); }
+  );
+  assert.equal(result.pages, 40);
+  assert.equal(result.items.length, 1000);
+  assert.equal(requested.includes(41), false);
+  assert.match(result.reason, /GitHub 单次查询上限/);
+  assert.equal(result.limited, true);
+});
+
+test('fast N stops after N consecutive terminal pages, resetting streak on activity', async () => {
+  const pages = [];
+  const result = await scanWorkflowPages(
+    { mode: 'fast', ...scanLimitForMode('fast', 2) },
+    async page => { pages.push(page); return mockPage(page, { terminalPage: [1, 3, 4].includes(page) }); }
+  );
+  assert.equal(result.pages, 4);
+  assert.deepEqual(pages, [1, 2, 3, 4]);
+  assert.match(result.reason, /连续 2 页终态/);
+});
+
+test('full scan stops at configured 20 pages, independent of terminal streak', async () => {
+  const pages = [];
+  const result = await scanWorkflowPages(
+    { mode: 'full', ...scanLimitForMode('full', 20) },
+    async page => { pages.push(page); return mockPage(page, { terminalPage: true }); }
+  );
+  assert.equal(result.pages, 20);
+  assert.equal(pages.length, 20);
+  assert.equal(result.items.length, 500);
+  assert.match(result.reason, /设定上限 20 页/);
+});
+
+test('read errors keep the first six pages for read-only preview', async () => {
+  await assert.rejects(
+    scanWorkflowPages({ mode: 'fast', ...scanLimitForMode('fast', 2) },
+      async page => {
+        if (page === 7) throw new Error('HTTP 429');
+        return mockPage(page);
+      }
+    ),
+    error => {
+      assert.equal(error.failedPage, 7);
+      assert.equal(error.partialScan.pages, 6);
+      assert.equal(error.partialScan.items.length, 150);
+      assert.match(error.message, /HTTP 429/);
+      return true;
+    }
+  );
+});
+
+test('empty last page terminates without attempting another page', async () => {
+  const pages = [];
+  const result = await scanWorkflowPages(
+    { mode: 'full', ...scanLimitForMode('full', 20) },
+    async page => { pages.push(page); return mockPage(page, { count: page === 3 ? 0 : 25, lastPage: page === 3 }); }
+  );
+  assert.deepEqual(pages, [1, 2, 3]);
+  assert.equal(result.pages, 3);
+  assert.equal(result.reason, '到达最后一页');
+});
+
+test('duplicate page is rejected and partial data is retained', async () => {
+  await assert.rejects(
+    scanWorkflowPages({ mode: 'fast', ...scanLimitForMode('fast', 2) },
+      async () => mockPage(1)
+    ),
+    error => {
+      assert.equal(error.failedPage, 2);
+      assert.equal(error.partialScan.pages, 1);
+      assert.match(error.message, /重复分页/);
+      return true;
+    }
+  );
 });
