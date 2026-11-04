@@ -1,0 +1,13 @@
+{
+  "name": "addon-workbench",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Independent browser extensions and other productivity add-ons",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "package": "node scripts/package.mjs",
+    "check": "npm test && npm run package"
+  },
+  "engines": { "node": ">=22" }
+}

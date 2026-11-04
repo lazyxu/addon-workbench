@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Actions Sweeper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header class="top">
+      <img src="icons/icon48.png" width="36" height="36" alt="">
+      <div>
+        <h1>Actions Sweeper</h1>
+        <p>GitHub Actions · 历史排队清理</p>
+      </div>
+      <span class="version">v0.1</span>
+    </header>
+
+    <div class="repo" id="repo" aria-live="polite">正在读取当前 GitHub 仓库…</div>
+    <div id="unsupported" class="notice error" hidden>请先打开 GitHub 仓库页面，再点击此扩展图标。</div>
+
+    <section id="tool">
+      <div class="fields">
+        <label>工作流文件
+          <input id="workflow" type="text" placeholder="ci.yml" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>目标分支
+          <input id="branch" type="text" placeholder="main 或 master" autocomplete="off" spellcheck="false" />
+        </label>
+      </div>
+      <div class="fields compact">
+        <label>扫描方式
+          <select id="mode">
+            <option value="fast">快速 · 连续 2 页终态</option>
+            <option value="full">完整 · 扫到末页或上限</option>
+          </select>
+        </label>
+        <label>最多页数
+          <input id="maxPages" type="number" value="20" min="1" max="100" inputmode="numeric" />
+        </label>
+      </div>
+      <p class="hint">仅筛选目标工作流、目标分支；保护当前 HEAD 和最近一次旧 Run。</p>
+      <button type="button" id="scan" class="button primary">扫描旧 CI</button>
+    </section>
+
+    <div id="progress" class="status" aria-live="polite">默认仅扫描，不会提交取消请求。</div>
+
+    <section id="results" hidden>
+      <div class="stats">
+        <div><strong id="statRuns">0</strong><span>已扫描 Run</span></div>
+        <div><strong id="statOld">0</strong><span>旧 Run</span></div>
+        <div><strong id="statQueued">0</strong><span>可取消</span></div>
+      </div>
+      <p id="protectedInfo" class="hint"></p>
+      <p id="coverageInfo" class="hint"></p>
+      <div class="candidateTop"><strong>候选任务</strong><button type="button" id="selectAll" class="link-button">全选 / 取消</button></div>
+      <div id="candidateList" class="candidateList" role="group" aria-label="候选 CI Run"></div>
+      <label class="toggle"><input id="dryRun" type="checkbox" checked> Dry Run（只模拟，不发送取消请求）</label>
+      <button type="button" id="cancel" class="button warn" disabled>没有可取消任务</button>
+      <button type="button" id="stop" class="button subtle" hidden>停止后续请求</button>
+      <div id="confirmation" class="confirmation" hidden>
+        <p>即将向 GitHub 发送取消请求。请输入仓库名 <strong id="repoConfirmLabel"></strong> 确认：</p>
+        <input id="repoConfirmInput" type="text" autocomplete="off" placeholder="输入仓库名">
+        <div class="actions">
+          <button type="button" id="confirmCancel" class="button warn" disabled>确认取消</button>
+          <button type="button" id="dismissConfirm" class="button subtle">返回</button>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>无需 Token · 批量取消时保持弹窗打开</span>
+      <button type="button" id="showHistory" class="link-button">操作历史</button>
+    </footer>
+    <div id="historyPanel" class="history" hidden></div>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
