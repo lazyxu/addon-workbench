@@ -11,11 +11,11 @@ A monorepo for small, independent productivity add-ons. Each add-on has its own 
 ## Install (Chrome / Edge)
 
 1. Open the [Package extensions workflow](actions/workflows/package.yml), select a successful **master** run, and download the `chrome-extensions-...` artifact.
-2. Extract the artifact, then extract `actions-sweeper-chrome-v*.zip` into its own folder.
+2. Extract the downloaded artifact **once**. It contains one directly loadable folder per extension; for Actions Sweeper, use the `actions-sweeper` folder containing `manifest.json`.
 3. In `chrome://extensions` or `edge://extensions`, enable **Developer mode** and select **Load unpacked**.
-4. Choose the extracted directory containing `manifest.json`, pin **Actions Sweeper** to the toolbar, and open a GitHub repository.
+4. Choose the `actions-sweeper` folder, pin **Actions Sweeper** to the toolbar, and open a GitHub repository.
 
-For development, you can load `extensions/actions-sweeper` directly without building.
+There is no second, nested extension ZIP to extract. For development, you can load `extensions/actions-sweeper` directly without building.
 
 ## Development
 
@@ -30,7 +30,7 @@ npm run package
 
 ## CI
 
-`.github/workflows/package.yml` runs tests and packages **every extension** for pull requests, manual dispatches, and each push to `master`. The downloadable ZIPs appear in the GitHub Actions **Artifacts** section. Names include the extension version and commit SHA; artifacts are kept for 30 days. CI artifacts are **not** a Chrome Web Store publication or GitHub Release.
+`.github/workflows/package.yml` runs tests and packages **every extension** for pull requests, manual dispatches, and each push to `master`. CI verifies the installable ZIPs in `dist/`, then uploads the extension directories from `extensions/` as the downloadable artifact. GitHub wraps the artifact in a ZIP, so extracting it once exposes the extension folders directly. Artifact names include the commit SHA; artifacts are kept for 30 days. CI artifacts are **not** a Chrome Web Store publication or GitHub Release.
 
 ## Security boundaries
 

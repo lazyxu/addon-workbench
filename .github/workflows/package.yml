@@ -36,9 +36,12 @@ jobs:
           for archive in "${archives[@]}"; do
             unzip -t "$archive"
           done
+      # Upload the extension directories, not the ZIPs in dist/.
+      # GitHub wraps artifacts in a ZIP automatically; this makes one extraction
+      # produce directly loadable folders containing manifest.json.
       - uses: actions/upload-artifact@v4
         with:
           name: chrome-extensions-${{ github.sha }}
-          path: dist/*.zip
+          path: extensions/
           if-no-files-found: error
           retention-days: 30
