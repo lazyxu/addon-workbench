@@ -32,6 +32,6 @@ test("cancellation is wired directly to a single click, never started by scannin
 
 test("manifest and popup explicitly agree on v0.1.6", () => {
   const manifest = JSON.parse(read("manifest.json"));
-  assert.equal(manifest.version, "0.1.6");
+  assert.equal(manifest.version, "0.1.7");
   assert.match(read("popup.html"), /class="version">v0\.1\.6</);
 });
