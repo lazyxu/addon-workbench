@@ -2,7 +2,7 @@
 
 **Standalone GitHub Actions queue cleaner for Chrome / Edge.** No repository, service, or account is hard-coded.
 
-Open any `github.com/OWNER/REPO` page and click the browser toolbar button. The workflow is prefilled with `ci.yml` (or inferred from the current workflow page). The branch is initially `master` and automatically updated to the repository default branch (`main`, `master`, etc.) when detectable. Verify the fallback if detection is unavailable. Click **Scan** to preview candidates. **Dry Run** starts enabled; to actually cancel, uncheck it, select runs, and enter the repository name to confirm.
+Open any `github.com/OWNER/REPO` page and click the browser toolbar button. The workflow is prefilled with `ci.yml` (or inferred from the current workflow page). The branch is initially `master` and automatically updated to the repository default branch (`main`, `master`, etc.) when detectable. Verify the fallback if detection is unavailable. Click **Scan** to preview candidates. Scanning is read-only. Select the old queued runs and click **Cancel selected** once to start verified cancellation immediately, without a Dry Run toggle or secondary confirmation. Every request is still validated against branch HEAD, run state, and the logged-in GitHub run details.
 
 ## Safety rules
 
