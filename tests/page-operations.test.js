@@ -363,7 +363,7 @@ test('same-origin queued jobs allow preflight without REST', async () => withPag
   assert.equal(ctx.detailReads.length,1);
   assert.equal(ctx.detailReads[0].options.credentials,'same-origin');
   assert.ok(ctx.reads.every(call => !String(call.path).startsWith('https://api.github.com/')));
-});
+}));
 
 test('conflicting job lists and completed steps stop cancellation', async () => {
   for (const detailJSON of [
