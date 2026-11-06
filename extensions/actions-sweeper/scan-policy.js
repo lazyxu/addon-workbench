@@ -40,7 +40,7 @@ export function scanStopDecision({ mode, page, maxPages, terminalPages, consecut
 
 /** Testable collector: errors retain safely scanned data, but never signal complete coverage. */
 export async function scanWorkflowPages(settings, readPage, {
-  onProgress = () => {}, shouldStop = () => false, pause = async () => {}
+  onProgress = () => {}, onPage = () => {}, shouldStop = () => false, pause = async () => {}
 } = {}) {
   const all = [];
   const seen = new Set();
@@ -48,7 +48,12 @@ export async function scanWorkflowPages(settings, readPage, {
   let pages = 0;
   for (let page = 1; page <= settings.maxPages; page++) {
     if (page > 1) await pause();
-    if (shouldStop()) throw new Error("扫描已手动停止（没有执行取消操作）");
+    if (shouldStop()) {
+      const error = new Error("扫描已手动停止（没有执行取消操作）");
+      error.failedPage = page;
+      error.partialScan = { items: [...all], pages };
+      throw error;
+    }
     onProgress(page, streak);
     let result;
     try {
@@ -76,6 +81,19 @@ export async function scanWorkflowPages(settings, readPage, {
     const decision = scanStopDecision({
       ...settings, page, consecutiveTerminalPages: streak, lastPage: result.lastPage
     });
+    // Notify only after the page passed validation. Progress is read-only:
+    // the caller must not expose any cancellation action before completion.
+    try {
+      onPage({
+        page, pages, items: [...all], consecutiveTerminalPages: streak,
+        lastPage: result.lastPage, decision
+      });
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      error.failedPage = page;
+      error.partialScan = { items: [...all], pages };
+      throw error;
+    }
     if (decision.done) return { items: all, pages, reason: decision.reason, limited: decision.limited };
   }
   throw new Error("扫描上限无效，未能安全结束");
