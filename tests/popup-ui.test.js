@@ -14,7 +14,7 @@ test("popup has a single scan-and-cancel action without dry-run or second confir
     "confirmCancel", "dismissConfirm", "selectAll", "cancel"]) {
     assert.doesNotMatch(html, new RegExp('id="' + key + '"'));
   }
-  assert.doesNotMatch(html, /Dry Run|二次确认/);
+  assert.doesNotMatch(html, /Dry Run|请输入仓库名|确认取消/);
   assert.match(html, /id="scan"[^>]*>扫描并取消旧 CI/);
   assert.match(html, /扫描结束即开始逐条取消/);
   assert.match(html, /已开始的 Job 可能被中断/);
