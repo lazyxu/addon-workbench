@@ -193,6 +193,54 @@ export async function pageOperation(input) {
     return { branch: candidates.find(x => x && !/[\s<>]/.test(x)) || null };
   }
   if (op === "page") return await parsePage(page);
+  // GitHub can show a workflow as queued while earlier jobs are already
+  // running/completed. Verify the public REST run and *every* visible job
+  // immediately before PUT; an unverifiable run must never be cancelled.
+  const verifyNeverStarted = async actual => {
+    const apiRoot = `https://api.github.com/repos/${owner}/${repo}/actions/runs/${actual.id}`;
+    const fetchJSON = async url => {
+      let response;
+      try {
+        response = await fetch(url, {
+          credentials: "omit", cache: "no-store",
+          headers: { accept: "application/vnd.github+json" }
+        });
+      } catch (cause) {
+        throw new Error(`无法访问 GitHub REST 进行 Job 核验：${cause?.message || String(cause)}；拒绝取消`);
+      }
+      if (!response.ok) {
+        throw new Error(`GitHub Job 安全核验失败：HTTP ${response.status}；无 Token 只能核验公开仓库，拒绝取消`);
+      }
+      try { return await response.json(); } catch {
+        throw new Error("GitHub Job 核验返回非法 JSON，拒绝取消");
+      }
+    };
+    const remote = await fetchJSON(apiRoot);
+    const workflowPath = `.github/workflows/${workflow}`;
+    if (remote?.id !== actual.id || remote?.head_branch !== branch ||
+        String(remote?.head_sha || "").toLowerCase() !== actual.sha ||
+        (remote?.path !== workflowPath &&
+         !String(remote?.path || "").startsWith(workflowPath + "@")) ||
+        remote?.status !== "queued" || remote?.conclusion != null ||
+        remote?.run_attempt !== 1) {
+      throw new Error(`Run #${actual.id} 不再是首次排队的目标工作流，拒绝取消`);
+    }
+    const page = await fetchJSON(apiRoot + "/jobs?per_page=100");
+    if (!Number.isSafeInteger(page?.total_count) || page.total_count < 0 ||
+        page.total_count > 100 || !Array.isArray(page.jobs) ||
+        page.jobs.length !== page.total_count) {
+      throw new Error(`Run #${actual.id} 的 Job 列表不完整或超过 100 条，拒绝取消`);
+    }
+    const startedJob = page.jobs.find(job => (
+      !Number.isSafeInteger(job?.id) || job.id <= 0 ||
+      job.status !== "queued" || job.conclusion != null ||
+      (Array.isArray(job.steps) && job.steps.some(step =>
+        step.status === "in_progress" || step.status === "completed"))
+    ));
+    if (startedJob) {
+      throw new Error(`Run #${actual.id} 的 Job 已开始/完成或状态不确定（${String(startedJob.name || startedJob.id)}），禁止取消`);
+    }
+  };
   if (op === "cancel-one") {
     if (!candidate || !Number.isSafeInteger(candidate.id) || candidate.id <= 0 ||
         !/^\d+$/.test(String(candidate.suite || "")) ||
@@ -210,6 +258,7 @@ export async function pageOperation(input) {
         !actual.queued || actual.sha === latest) {
       throw new Error(`Run #${candidate.id} 已不满足未运行旧构建条件，安全停止`);
     }
+    await verifyNeverStarted(actual);
     const response = await fetch(`${root}/suites/${actual.suite}/cancel`, {
       method: "PUT", credentials: "same-origin",
       headers: {
