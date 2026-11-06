@@ -20,4 +20,6 @@ After each fully validated page, the popup updates the cumulative scanned Run co
 
 ## Limitations
 
+A workflow **Run** can be labeled `queued` while one or more **Jobs** are already running or completed. For any actual cancellation, the extension first rechecks the workflow page and then fetches the GitHub REST Run and up to 100 Jobs (read-only), and refuses cancellation unless it can confirm first attempt, matching branch/workflow/SHA, `status=queued`, and every Job still `queued`. Partial Job lists and API failures fail closed. This REST safeguard works without a token for public repositories, subject to GitHub's anonymous API rate limits; private repositories or blocked cross-origin requests may fail this strict preflight and cannot be cancelled in that case. Dry Run only tests the initial page-derived candidate set, not this final Job verification. GitHub can still start a Job between the final check and the cancellation request.
+
 GitHub's internal page JSON and same-origin `/suites/{id}/cancel` endpoint are not stable public APIs. GitHub changes can break the extension; in that situation it refuses the operation. There is an unavoidable race between last-minute status validation and an HTTP cancellation request. Keep the popup open until a batch finishes. Verify final run states in GitHub Actions afterwards.
