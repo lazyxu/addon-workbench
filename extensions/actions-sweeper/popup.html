@@ -18,7 +18,7 @@
         <h1>Actions Sweeper</h1>
         <p>GitHub Actions · 历史排队清理</p>
       </div>
-      <span class="version">v0.1.3</span>
+      <span class="version">v0.1.4</span>
     </header>
 
     <div class="repo" id="repo" aria-live="polite">正在读取当前 GitHub 仓库…</div>
@@ -50,6 +50,17 @@
     </section>
 
     <div id="progress" class="status" aria-live="polite">默认仅扫描，不会提交取消请求。</div>
+    <section id="liveScan" class="liveScan" hidden aria-label="扫描实时统计">
+      <p class="liveScanTitle">已完成 <strong id="livePages">0</strong> 页 · 每页读取后更新</p>
+      <div class="stats liveStats">
+        <div><strong id="liveRuns">0</strong><span>已扫描 Run</span></div>
+        <div><strong id="liveOld">0</strong><span>旧 Run</span></div>
+        <div><strong id="liveQueued">0</strong><span>排队 Run</span></div>
+        <div><strong id="liveEligible">0</strong><span>候选（暂估）</span></div>
+      </div>
+      <p class="hint liveHint">扫描尚未结束，候选数量可能变化；此时不能取消。</p>
+    </section>
+    <button type="button" id="stop" class="button subtle" hidden>停止扫描</button>
 
     <section id="results" hidden>
       <div class="stats">
@@ -63,7 +74,6 @@
       <div id="candidateList" class="candidateList" role="group" aria-label="候选 CI Run"></div>
       <label class="toggle"><input id="dryRun" type="checkbox" checked> Dry Run（只模拟，不发送取消请求）</label>
       <button type="button" id="cancel" class="button warn" disabled>没有可取消任务</button>
-      <button type="button" id="stop" class="button subtle" hidden>停止后续请求</button>
       <div id="confirmation" class="confirmation" hidden>
         <p>即将向 GitHub 发送取消请求。请输入仓库名 <strong id="repoConfirmLabel"></strong> 确认：</p>
         <input id="repoConfirmInput" type="text" autocomplete="off" placeholder="输入仓库名">
