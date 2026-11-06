@@ -7,8 +7,9 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
   const ui = Object.fromEntries([
     "repo", "unsupported", "tool", "workflow", "branch", "mode", "scanLimit", "limitLabel", "limitHint", "scan", "progress",
     "results", "statRuns", "statOld", "statQueued", "protectedInfo", "coverageInfo",
-    "candidateList", "selectAll", "dryRun", "cancel", "stop", "confirmation", "repoConfirmLabel",
-    "repoConfirmInput", "confirmCancel", "dismissConfirm", "showHistory", "historyPanel"
+    "candidateList", "selectAll", "cancel", "stop",
+    "liveScan", "livePages", "liveRuns", "liveOld", "liveQueued", "liveEligible",
+    "showHistory", "historyPanel"
   ].map(id => [id, $(id)]));
   let context = null;
   let tabId = null;
@@ -47,14 +48,14 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     ui.mode.disabled = next;
     ui.scanLimit.disabled = next;
     ui.selectAll.disabled = next;
-    ui.dryRun.disabled = next;
     ui.stop.hidden = !next;
+    if (next) ui.stop.textContent = snapshot ? "停止后续取消请求" : "停止扫描";
   }
   function resetResults() {
     if (busy) return;
     snapshot = null;
+    ui.liveScan.hidden = true;
     ui.results.hidden = true;
-    ui.confirmation.hidden = true;
     ui.candidateList.replaceChildren();
     ui.cancel.disabled = true;
   }
@@ -103,8 +104,8 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     if (!snapshot) return;
     const count = selectedRuns().length;
     ui.cancel.disabled = busy || count === 0 || snapshot.incomplete === true;
-    ui.cancel.textContent = snapshot.incomplete ? "扫描不完整：禁止取消" : count === 0 ? "没有选中的任务" :
-      (ui.dryRun.checked ? `预演 ${count} 条取消操作` : `取消选中的 ${count} 条旧 CI`);
+    ui.cancel.textContent = snapshot.incomplete ? "扫描不完整：禁止取消" : count === 0 ?
+      "没有选中的候选任务" : `立即核验并取消 ${count} 条旧 CI`;
   }
   function renderResults() {
     const selection = snapshot.selection;
@@ -135,6 +136,22 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     }
     updateCancelButton();
   }
+  function showLiveCounts({ page, items, consecutiveTerminalPages }, head, settings) {
+    // Counts describe only pages already read, never the whole GitHub history.
+    // Reusing chooseRuns also applies HEAD and newest-old protection.
+    const selection = chooseRuns(items, head);
+    const queued = new Set(items.filter(item => item.queueObserved === true || item.queued === true).map(item => item.id)).size;
+    ui.livePages.textContent = String(page);
+    ui.liveRuns.textContent = String(selection.total);
+    ui.liveOld.textContent = String(selection.older);
+    ui.liveQueued.textContent = String(queued);
+    ui.liveEligible.textContent = String(selection.eligible.length);
+    status(`已完成第 ${page} 页 · ${settings.owner}/${settings.repo}
+已扫描 ${selection.total} Run，确认旧 Run ${selection.older}，排队状态 ${queued}，可取消候选暂估 ${selection.eligible.length}` +
+      (settings.mode === "fast" ?
+        ` · 连续终态 ${consecutiveTerminalPages}/${settings.terminalPages}` : ""));
+  }
+
   async function scan() {
     if (busy) return;
     resetResults();
@@ -142,6 +159,10 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     try { settings = getSettings(); } catch (error) { status(errorText(error), true); return; }
     switchBusy(true);
     stopRequested = false;
+    ui.liveScan.hidden = false;
+    for (const key of ["livePages", "liveRuns", "liveOld", "liveQueued", "liveEligible"]) {
+      ui[key].textContent = "0";
+    }
     let confirmedHead = null;
     try {
       status("正在确认最新分支 SHA…");
@@ -161,8 +182,10 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       };
       const outcome = await scanWorkflowPages(settings, fetchWithRetry, {
         onProgress: (page, streak) => status(`扫描 ${settings.owner}/${settings.repo} · ${settings.workflow} · ${settings.branch}\n` +
-          (settings.mode === "fast" ? `第 ${page} 页 · 连续终态 ${streak}/${settings.terminalPages}` :
-            `第 ${page}/${settings.maxPages} 页`) + "…"),
+          (settings.mode === "fast" ? `正在读取第 ${page} 页 · 连续终态 ${streak}/${settings.terminalPages}` :
+            `正在读取第 ${page}/${settings.maxPages} 页`) +
+          ` · 已完成 ${page - 1} 页…`),
+        onPage: info => showLiveCounts(info, head, settings),
         shouldStop: () => stopRequested,
         pause: () => delay(250)
       });
@@ -171,7 +194,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       snapshot = { settings, head, selection, pages: outcome.pages, reason: outcome.reason,
         limited: outcome.limited, incomplete: false };
       renderResults();
-      status(`扫描完成：找到 ${selection.eligible.length} 条可取消的旧排队任务。\n${outcome.reason}\n尚未向 GitHub 发送任何取消请求。`);
+      status(`扫描完成：找到 ${selection.eligible.length} 条待核验旧排队任务。\n取消前还会检查 GitHub Run 和 Job 状态。\n${outcome.reason}\n尚未发送任何取消请求。`);
     } catch (error) {
       const partial = error.partialScan;
       if (confirmedHead && partial?.items?.length) {
@@ -193,7 +216,11 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
         ui.results.hidden = true;
         status(errorText(error), true);
       }
-    } finally { switchBusy(false); updateCancelButton(); }
+    } finally {
+      ui.liveScan.hidden = true;
+      switchBusy(false);
+      updateCancelButton();
+    }
   }
   async function saveHistory(item) {
     try {
@@ -202,7 +229,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       await chrome.storage.local.set({ sweepHistory: [item, ...history].slice(0, 40) });
     } catch (error) { console.warn("无法写入本地操作历史", error); }
   }
-  async function runCancellation(isDryRun) {
+  async function runCancellation() {
     if (busy || !snapshot || snapshot.incomplete) return;
     const runs = selectedRuns();
     if (!runs.length) return;
@@ -213,10 +240,6 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     const { settings, head } = snapshot;
     if (settings.workflow !== normalizeWorkflow(ui.workflow.value) || settings.branch !== normalizeBranch(ui.branch.value)) {
       resetResults(); status("设置已变化，请重新扫描", true); return;
-    }
-    if (isDryRun) {
-      status(`Dry Run：${runs.length} 条旧排队 CI 符合候选规则。\n没有向 GitHub 发送取消请求。`);
-      return;
     }
     switchBusy(true);
     stopRequested = false;
@@ -244,7 +267,6 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
         if (i + 1 < runs.length) await delay(600);
       }
     } finally {
-      ui.confirmation.hidden = true;
       switchBusy(false);
       resetResults();
       const summary = `操作结束：GitHub 已接受 ${accepted}，响应失败 ${failed}，安全停止 ${skipped}。`;
@@ -267,25 +289,16 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     for (const box of checkboxes) box.checked = newValue;
     updateCancelButton();
   });
-  ui.dryRun.addEventListener("change", () => { ui.confirmation.hidden = true; updateCancelButton(); });
+  // A single explicit click initiates the batch. Scan never sends PUTs.
   ui.cancel.addEventListener("click", () => {
-    if (!snapshot || snapshot.incomplete || busy || !selectedRuns().length) return;
-    if (ui.dryRun.checked) return void runCancellation(true);
-    ui.confirmation.hidden = false;
-    ui.repoConfirmLabel.textContent = context.repo;
-    ui.repoConfirmInput.value = "";
-    ui.confirmCancel.disabled = true;
-    ui.repoConfirmInput.focus();
+    if (busy || !snapshot || snapshot.incomplete || !selectedRuns().length) return;
+    runCancellation().catch(error => status(errorText(error), true));
   });
-  ui.repoConfirmInput.addEventListener("input", () => {
-    ui.confirmCancel.disabled = ui.repoConfirmInput.value.trim() !== context.repo;
+  ui.stop.addEventListener("click", () => {
+    stopRequested = true;
+    status(snapshot ? "正在停止后续取消请求；已发送的请求仍可能被 GitHub 接受…" :
+      "正在停止扫描；当前页读取完成后会保留只读预览。");
   });
-  ui.confirmCancel.addEventListener("click", () => {
-    if (ui.repoConfirmInput.value.trim() !== context.repo || ui.confirmCancel.disabled) return;
-    runCancellation(false).catch(error => status(errorText(error), true));
-  });
-  ui.dismissConfirm.addEventListener("click", () => { ui.confirmation.hidden = true; });
-  ui.stop.addEventListener("click", () => { stopRequested = true; status("正在停止，当前已发出的请求可能仍被 GitHub 接受…"); });
   ui.showHistory.addEventListener("click", async () => {
     ui.historyPanel.hidden = !ui.historyPanel.hidden;
     if (ui.historyPanel.hidden) return;

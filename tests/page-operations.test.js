@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pageOperation } from '../extensions/actions-sweeper/page-operations.js';
+import { chooseRuns } from '../extensions/actions-sweeper/selection.js';
 
 const currentSha = 'a'.repeat(40);
 const olderSha = 'b'.repeat(40);
@@ -14,17 +15,26 @@ const row = (status = 'WORKFLOW_RUN_STATUS_QUEUED', timingText='') => ({
   createdAt: { timestamp:stamp }, state:{status}, timing:{text:timingText,kind:''}
 });
 
-async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200, unrelatedQueuedText = false}, fn) {
+async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200,
+  unrelatedQueuedText = false, omitDomAnchors = false, detailsStatus = 200,
+  jobsResponse = { totalCount:1, nodes:[{id:321, name:'test job', status:'queued', conclusion:null}] },
+  detailJSON = null, detailJobLinks = [] }, fn) {
   const before = {fetch:globalThis.fetch, location:globalThis.location, DOMParser:globalThis.DOMParser};
   let sentCancel = 0;
   const reads = [];
+  const detailReads = [];
   globalThis.location = { origin: 'https://github.com', pathname:'/example/repository/actions/workflows/build.yml' };
   globalThis.DOMParser = class {
     parseFromString(payload) {
-      const {rows} = JSON.parse(payload);
+      const parsed = JSON.parse(payload);
+      const parsedRows = parsed.rows;
       return {querySelectorAll(selector) {
-        if (selector === 'script[type="application/json"]') return [{textContent:JSON.stringify({workflowRunsRoute:{workflowRuns:rows}})}];
-        if (selector === 'a[href*="/actions/runs/"]') return rows.map(r => ({getAttribute:() => '/example/repository/actions/runs/' + r.id}));
+        if (selector === 'script[type="application/json"]') return [{textContent:JSON.stringify(
+          parsedRows ? {workflowRunsRoute:{workflowRuns:parsedRows}} : parsed
+        )}];
+        if (selector === 'a[href*="/actions/runs/"]') return omitDomAnchors || !parsedRows ? [] : parsedRows.map(r => ({getAttribute:() => '/example/repository/actions/runs/' + r.id}));
+        if (selector === 'a[href*="/job/"]') return detailJobLinks.map(id =>
+          ({getAttribute:() => '/example/repository/actions/runs/123/job/' + id}));
         if (unrelatedQueuedText && selector.startsWith("span,")) return [{textContent:"Queued",childElementCount:0,getAttribute:() => null}];
         return [];
       }};
@@ -35,13 +45,24 @@ async function withPage({rows = [row()], sha = currentSha, status = 200, readSta
     if (path.endsWith('.atom')) return { ok:true, status:200, text:async () => atom(sha) };
     if (path.includes('/actions/workflows/build.yml?')) return { ok:readStatus === 200, status:readStatus,
       headers: {get: () => null}, text:async () => JSON.stringify({rows, unrelatedComponent: unrelatedQueuedText ? {text:"Queued"} : null}) };
+    if (path === '/example/repository/actions/runs/123') {
+      detailReads.push({path,options});
+      return {
+        ok: detailsStatus === 200, status: detailsStatus,
+        headers:{ get: () => null },
+        text:async () => JSON.stringify(detailJSON || {payload:{workflowRunJobsRoute:{jobs:jobsResponse}}})
+      };
+    }
+    if (String(path).startsWith('https://api.github.com/')) {
+      throw new Error('Cross-origin REST must not be used: ' + path);
+    }
     if (path.endsWith('/suites/777/cancel')) {
       sentCancel++;
       return { status, text:async() => status === 200 ? '{"message":"successfully requested"}' : 'Unauthorized' };
     }
     throw Error('unexpected fetch ' + path);
   };
-  try { return await fn({getSentCancel:() => sentCancel,reads}); }
+  try { return await fn({getSentCancel:() => sentCancel,reads,detailReads}); }
   finally { Object.assign(globalThis, before); }
 }
 
@@ -229,4 +250,280 @@ test('fully terminal page remains eligible for fast stop with optional metadata 
   assert.equal(page.terminalPage, true);
   assert.equal(page.incompleteTerminalRuns, 25);
   assert.ok(page.items.every(item => !item.queued));
+}));
+
+
+test('queue label and cancellable confidence are distinct when timing reports running', async () => withPage({
+  rows: [{ ...row('WORKFLOW_RUN_STATUS_QUEUED', 'Running'), id:42196976014 }]
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.items[0].queueObserved, true);
+  assert.equal(page.items[0].startedEvidence, true);
+  assert.equal(page.items[0].queued, false);
+  assert.equal(page.terminalPage, false);
+}));
+
+test('normalize unprefixed queued and in-progress states', async () => withPage({
+  rows: [{...row(), state:null, status:'queued'}]
+}, async () => {
+  const page = await pageOperation({op:'page',...input,page:1});
+  assert.equal(page.items[0].queueObserved, true);
+  assert.equal(page.items[0].queued, true);
+}));
+
+test('completed conclusions are terminal even when GitHub uses SUCCESS/FAILURE names', async () => withPage({
+  rows: Array.from({length:25}, (_, i) => ({
+    ...row(['WORKFLOW_RUN_STATUS_SUCCESS','WORKFLOW_RUN_STATUS_FAILURE','WORKFLOW_RUN_STATUS_SKIPPED'][i%3]),
+    id:3000+i,
+    description:null,
+    createdAt:null
+  }))
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.terminalPage, true);
+  assert.equal(page.allRunsTerminal, true);
+  assert.equal(page.incompleteTerminalRuns, 25);
+  assert.ok(page.items.every(item => item.queued === false));
+}));
+
+test('fast terminal recognition works when GitHub page has no pre-rendered run anchors', async () => withPage({
+  rows: Array.from({length:25}, (_, i) => ({...row('WORKFLOW_RUN_STATUS_COMPLETED'), id:4000+i})),
+  omitDomAnchors:true
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.domValidated, false);
+  assert.equal(page.terminalPage, true);
+  assert.equal(page.items.length, 25);
+}));
+
+test('unknown state does not stop fast scan prematurely', async () => withPage({
+  rows: Array.from({length:25}, (_, i) => ({
+    ...row(i===0 ? 'WORKFLOW_RUN_STATUS_SOMETHING_NEW' : 'WORKFLOW_RUN_STATUS_COMPLETED'),
+    id:5000+i
+  }))
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.terminalPage, false);
+  assert.equal(page.allRunsTerminal, false);
+}));
+
+
+test('never cancels when a queued workflow has a completed job in same-origin HTML', async () => withPage({
+  jobsResponse:{totalCount:2,nodes:[
+    {id:1,name:'pr-scope',status:'completed',conclusion:'success'},
+    {id:2,name:'android-native',status:'queued',conclusion:null}
+  ]}
+}, async ctx => {
+  const result = await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.match(result.message,/Job 已开始\/完成/);
+  assert.equal(ctx.getSentCancel(),0);
+  assert.equal(ctx.detailReads.length,1);
+  assert.equal(ctx.detailReads[0].path,'/example/repository/actions/runs/123');
+  assert.equal(ctx.detailReads[0].options.credentials,'same-origin');
+  assert.ok(ctx.reads.every(call => !String(call.path).startsWith('https://api.github.com/')));
+}));
+
+test('never cancels a queued workflow with in-progress job', async () => withPage({
+  jobsResponse:{totalCount:1,nodes:[{id:2,name:'compile',status:'in_progress',conclusion:null}]}
+}, async ctx => {
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('never cancels if GitHub page is inaccessible or job metadata incomplete', async () => {
+  for (const props of [
+    {detailsStatus:403},
+    {detailsStatus:429},
+    {detailJSON:{payload:{workflowRunJobsRoute:{jobs:[]}}}},
+    {jobsResponse:{totalCount:101,nodes:[]}},
+    {jobsResponse:{totalCount:2,nodes:[{id:1,name:'job',status:'queued'}]}},
+    {jobsResponse:{nodes:[{id:1,name:'job',status:'queued'}]}},
+    {jobsResponse:{totalCount:1,nodes:[{id:1,name:'job'}]}},
+    {detailJSON:{unrelated:{message:'Queued'}}}
+  ]) {
+    await withPage(props, async ctx=>{
+      const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+      assert.equal(result.__actionsSweeperError,true);
+      assert.equal(ctx.getSentCancel(),0);
+    });
+  }
+});
+
+test('same-origin queued jobs allow preflight without REST', async () => withPage({
+  jobsResponse:{totalCount:1,nodes:[{
+    id:321,name:'waiting for runner',status:'queued',conclusion:null,
+    started_at:stamp
+  }]}
+}, async ctx => {
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+  assert.equal(ctx.detailReads.length,1);
+  assert.equal(ctx.detailReads[0].options.credentials,'same-origin');
+  assert.ok(ctx.reads.every(call => !String(call.path).startsWith('https://api.github.com/')));
+}));
+
+test('conflicting job lists and completed steps stop cancellation', async () => {
+  for (const detailJSON of [
+    {a:{jobs:{totalCount:1,nodes:[{id:1,name:'x',status:'queued'}]}},
+     b:{jobs:{totalCount:1,nodes:[{id:1,name:'x',status:'completed'}]}}},
+    {jobs:{totalCount:1,nodes:[{id:1,name:'x',status:'queued',
+      steps:[{status:'completed'}]}]}}
+  ]) {
+    await withPage({detailJSON}, async ctx=>{
+      const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+      assert.equal(result.__actionsSweeperError,true);
+      assert.equal(ctx.getSentCancel(),0);
+    });
+  }
+});
+
+test('GitHub real queue timer: Queued text with IN_PROGRESS kind is still queued', async () => withPage({
+  rows: [{
+    ...row('WORKFLOW_RUN_STATUS_QUEUED', 'Queued'),
+    id: 42205760126,
+    timing: {
+      text: 'Queued',
+      kind: 'WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS'
+    }
+  }]
+}, async ctx => {
+  const page = await pageOperation({op:'page',...input,page:1});
+  assert.equal(page.__actionsSweeperError, undefined);
+  assert.equal(page.items[0].queueObserved, true);
+  assert.equal(page.items[0].startedEvidence, false);
+  assert.equal(page.items[0].queued, true);
+  assert.equal(ctx.getSentCancel(), 0);
+}));
+
+test('real page-one distribution 21 queued + 4 completed yields nonzero initial candidates', async () => withPage({
+  rows: [
+    ...Array.from({length:21}, (_, i) => ({
+      ...row('WORKFLOW_RUN_STATUS_QUEUED','Queued'),
+      id: 42205760126 - i,
+      timing: {
+        text:'Queued',
+        kind:'WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS'
+      }
+    })),
+    ...Array.from({length:4}, (_, i) => ({
+      ...row('WORKFLOW_RUN_STATUS_COMPLETED','3h 58m 34s'),
+      id: 42176673236 - i,
+      timing: {
+        text:'3h 58m 34s',
+        kind:'WORKFLOW_RUN_TIMING_KIND_DURATION'
+      }
+    }))
+  ]
+}, async () => {
+  const page = await pageOperation({op:'page',...input,page:1});
+  assert.equal(page.total,25);
+  assert.deepEqual(page.statuses,{QUEUED:21,COMPLETED:4});
+  assert.equal(page.items.filter(item=>item.queueObserved).length,21);
+  assert.equal(page.items.filter(item=>item.queued).length,21);
+  assert.equal(page.terminalPage,false);
+  const selection = chooseRuns(page.items,currentSha);
+  assert.equal(selection.protectedLatestOld.id,42205760126);
+  assert.equal(selection.eligible.length,20);
+  assert.equal(selection.skippedNonQueued,4);
+}));
+
+test('queued workflow timer kind cannot bypass job-level refusal if a job completed', async () => withPage({
+  rows:[{ ...row('WORKFLOW_RUN_STATUS_QUEUED','Queued'),
+    timing:{text:'Queued',kind:'WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS'}
+  }],
+  jobsResponse:{totalCount:2,nodes:[
+    {id:1,name:'pr-scope',status:'completed',conclusion:'success'},
+    {id:2,name:'build',status:'queued',conclusion:null}
+  ]}
+}, async ctx => {
+  const snapshot=await pageOperation({op:'page',...input,page:1});
+  assert.equal(snapshot.items[0].queued,true);
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.match(result.message,/Job 已开始/);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+
+test('accepts complete same-origin job array when end-of-pages is explicit without totalCount', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{jobs:{
+    edges:[{node:{id:1,name:'setup',status:'queued'}},{node:{id:2,name:'build',status:'queued'}}],
+    pageInfo:{hasNextPage:false}
+  }}}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+  assert.equal(ctx.detailReads.length,1);
+}));
+
+test('accepts complete same-origin job array when count is on parent container', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{
+    jobsCount:2,
+    jobs:[{id:1,name:'setup',status:'queued'},{id:2,name:'compile',status:'queued'}]
+  }}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+}));
+
+test('accepts job list when rendered job anchors confirm full coverage without count', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{
+    jobs:[{id:1001,name:'setup',status:'queued'},{id:1002,name:'build',status:'queued'}]
+  }}},
+  detailJobLinks:[1001,1002]
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+}));
+
+test('rejects job list with missing totalCount and only partial rendered links', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{
+    jobs:[{id:1001,name:'setup',status:'queued'},{id:1002,name:'build',status:'queued'}]
+  }}},
+  detailJobLinks:[1001]
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.match(result.message,/缺少完整性证据/);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('rejects apparent queued subset if a second incomplete list exposes a started job', async () => withPage({
+  detailJSON:{payload:{
+    complete:{jobs:{totalCount:1,nodes:[{id:1,name:'build',status:'queued'}]}},
+    additional:{jobs:[{id:2,name:'pr-scope',status:'completed'}]}
+  }}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.match(result.message,/Job 已开始/);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('rejects lists that explicitly have more pages even if length matches count', async () => withPage({
+  detailJSON:{payload:{jobs:{
+    totalCount:1,
+    nodes:[{id:1,name:'build',status:'queued'}],
+    pageInfo:{hasNextPage:true}
+  }}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('job detail request remains within logged-in github.com origin for fallback shapes', async () => withPage({
+  detailJSON:{payload:{jobs:{nodes:[{id:1,name:'build',status:'queued'}],pageInfo:{hasNextPage:false}}}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+  assert.ok(ctx.reads.every(r=>String(r.path).startsWith('/example/repository/') &&
+    r.options.credentials==='same-origin'));
 }));

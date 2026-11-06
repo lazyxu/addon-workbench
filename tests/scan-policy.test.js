@@ -127,3 +127,51 @@ test('duplicate page is rejected and partial data is retained', async () => {
     }
   );
 });
+
+
+test('live counts publish exactly once after each validated page', async () => {
+  const updates = [];
+  const result = await scanWorkflowPages(
+    { mode:'full', ...scanLimitForMode('full', 20) },
+    async page => mockPage(page, {count:page===3?3:25,lastPage:page===3}),
+    {onPage: update => updates.push({
+      page:update.page, pages:update.pages, total:update.items.length,
+      lastPage:update.lastPage, done:update.decision.done
+    })}
+  );
+  assert.deepEqual(updates, [
+    {page:1,pages:1,total:25,lastPage:false,done:false},
+    {page:2,pages:2,total:50,lastPage:false,done:false},
+    {page:3,pages:3,total:53,lastPage:true,done:true}
+  ]);
+  assert.equal(result.items.length,53);
+  assert.equal(result.pages,3);
+});
+
+test('failed page never emits a live update for unvalidated data', async () => {
+  const updates = [];
+  await assert.rejects(
+    scanWorkflowPages({ mode:'full', ...scanLimitForMode('full', 20) },
+      async page => page===2 ? {items:[{id:-1}],terminalPage:false,lastPage:false} : mockPage(page),
+      {onPage: state => updates.push(state.page)}),
+    error => error.failedPage===2 && error.partialScan.pages===1
+  );
+  assert.deepEqual(updates,[1]);
+});
+
+test('stop preserves already scanned pages for safe read-only preview', async () => {
+  const pages=[];
+  await assert.rejects(
+    scanWorkflowPages({ mode:'full', ...scanLimitForMode('full', 20) },
+      async page=>{pages.push(page);return mockPage(page);},
+      {shouldStop:()=>pages.length>=2}),
+    error=>{
+      assert.match(error.message,/手动停止/);
+      assert.equal(error.failedPage,3);
+      assert.equal(error.partialScan.pages,2);
+      assert.equal(error.partialScan.items.length,50);
+      return true;
+    }
+  );
+  assert.deepEqual(pages,[1,2]);
+});
