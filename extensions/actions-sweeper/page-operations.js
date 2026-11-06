@@ -211,66 +211,126 @@ export async function pageOperation(input) {
     if (!parsed.length) {
       throw new Error("Run #" + actual.id + " 缺少 GitHub 页面 JSON，拒绝取消");
     }
-    const normalized = value => String(value || "")
-      .replace(/^(?:WORKFLOW_RUN_|WORKFLOW_JOB_|CHECK_RUN_|JOB_)?STATUS_/i, "")
-      .trim().toUpperCase();
-    const matches = [];
-    const visit = (node, depth = 0) => {
-      if (!node || typeof node !== "object" || depth > 16) return;
+    const normalized = value => typeof value === "string" ?
+      value.replace(/^(?:(?:WORKFLOW_(?:RUN|JOB)_|CHECK_RUN_|JOB_)?STATUS_)/i, "")
+        .trim().replace(/[\s-]+/g, "_").toUpperCase() : "UNKNOWN";
+    const jobState = job => [job?.status, job?.state?.status,
+      job?.checkRun?.status, job?.check_run?.status, job?.jobStatus,
+      job?.currentStatus].find(v => typeof v === "string" && v.trim()) || null;
+    const jobConclusion = job => job?.conclusion ?? job?.state?.conclusion ??
+      job?.checkRun?.conclusion ?? job?.check_run?.conclusion;
+    const jobKey = job => job?.id ?? job?.databaseId ?? job?.checkRun?.id ??
+      job?.name ?? job?.displayName;
+    const hasStarted = job => {
+      const state = normalized(jobState(job));
+      const conclusion = jobConclusion(job);
+      return state !== "QUEUED" || (conclusion != null && conclusion !== "") ||
+        (Array.isArray(job?.steps) && job.steps.some(step =>
+          ["IN_PROGRESS", "COMPLETED", "RUNNING"].includes(normalized(
+            step?.status ?? step?.state?.status))));
+    };
+
+    const observations = [];
+    const findCount = (container, parent) => {
+      for (const value of [
+        container?.totalCount, container?.total_count, container?.jobsCount,
+        container?.jobCount, container?.totalJobs, container?.count,
+        parent?.jobsCount, parent?.jobCount, parent?.totalJobs,
+        parent?.totalJobCount, parent?.total_job_count
+      ]) {
+        if (Number.isSafeInteger(value) && value >= 0) return value;
+      }
+      return null;
+    };
+    const listFrom = value => Array.isArray(value) ? value :
+      Array.isArray(value?.nodes) ? value.nodes :
+      Array.isArray(value?.items) ? value.items :
+      Array.isArray(value?.edges) ? value.edges.map(edge => edge?.node) : null;
+    const visit = (node, path = "$", depth = 0) => {
+      if (!node || typeof node !== "object" || depth > 20) return;
       if (Array.isArray(node)) {
-        for (const item of node) visit(item, depth + 1);
+        for (const item of node.slice(0, 150)) visit(item, path + "[]", depth + 1);
         return;
       }
       for (const [key, value] of Object.entries(node)) {
-        if (/^(?:jobs|workflowJobs|checkRuns)$/i.test(key) && value) {
-          const jobs = Array.isArray(value) ? value :
-            (Array.isArray(value.nodes) ? value.nodes :
-              (Array.isArray(value.items) ? value.items : null));
-          const count = Number(
-            Array.isArray(value) ?
-              (node.jobsCount ?? node.jobCount ?? node.totalJobs ?? node.totalCount ?? node.total_count) :
-              (value.totalCount ?? value.total_count ?? value.count)
-          );
-          if (jobs && Number.isSafeInteger(count) && count > 0 && count <= 100 &&
-              jobs.length === count) {
-            matches.push({ jobs, count });
+        const childPath = path + "." + key;
+        if (/^(?:jobs|workflowJobs|checkRuns|workflowRunJobs|jobList|jobItems)$/i.test(key)) {
+          const jobs = listFrom(value);
+          if (jobs) {
+            const count = findCount(value, node);
+            const hasMore = value?.pageInfo?.hasNextPage === true ||
+              value?.pagination?.hasNextPage === true ||
+              value?.hasMore === true || value?.hasNextPage === true;
+            const endOfPages = value?.pageInfo?.hasNextPage === false ||
+              value?.pagination?.hasNextPage === false ||
+              value?.hasMore === false || value?.hasNextPage === false;
+            observations.push({
+              path: childPath, jobs, count, hasMore, endOfPages
+            });
           }
         }
-        visit(value, depth + 1);
+        visit(value, childPath, depth + 1);
       }
     };
-    for (const tree of parsed) visit(tree);
-    // We require a single, complete job collection (or identical repeated
-    // copies). A partial or ambiguous UI response is not evidence of safety.
-    const candidates = matches.filter(({jobs}) => jobs.every(job =>
-      job && typeof job === "object" &&
-      (typeof job.name === "string" || typeof job.id === "string" ||
-        Number.isSafeInteger(job.id)) &&
-      Boolean(job.status || job.state?.status)
-    ));
-    if (!candidates.length) {
+    parsed.forEach(tree => visit(tree));
+
+    // Any started Job shown in the run detail page is enough to refuse,
+    // even when the list is partial. Never trust a smaller queued subset.
+    const allObserved = observations.flatMap(o => o.jobs);
+    const started = allObserved.find(job => job && typeof job === "object" &&
+      jobState(job) && hasStarted(job));
+    if (started) {
       throw new Error("Run #" + actual.id +
-        " 的 Job 列表无法从已登录 GitHub 页面完整核验，拒绝取消");
+        " 的 Job 已开始/完成或状态不确定（" +
+        String(jobKey(started) || "unknown") + "），拒绝取消");
     }
-    const signatures = candidates.map(({jobs}) => JSON.stringify(jobs.map(job => [
-      String(job.id ?? job.databaseId ?? job.name),
-      normalized(job.status || job.state?.status),
-      String(job.conclusion || job.state?.conclusion || "")
-    ]).sort((a,b) => a[0].localeCompare(b[0]))));
+    const valid = observations.filter(o =>
+      o.jobs.length > 0 && o.jobs.length <= 100 &&
+      o.jobs.every(job => job && typeof job === "object" &&
+        jobKey(job) != null && jobState(job) && !hasStarted(job)));
+    const domIds = new Set();
+    const jobPath = new RegExp("^" + rootPattern +
+      "/actions/runs/" + actual.id + "/job/(\\d+)(?:[/?#]|$)");
+    for (const link of doc.querySelectorAll('a[href*="/job/"]')) {
+      const href = link.getAttribute("href") || "";
+      const path = href.startsWith("https://github.com") ?
+        href.slice(location.origin.length) : href;
+      const id = path.match(jobPath)?.[1];
+      if (id) domIds.add(id);
+    }
+    // A list is complete only when an explicit count/end marker, or an exact
+    // DOM-to-JSON job-ID match, demonstrates coverage. Missing totalCount
+    // alone must not reject a complete route list.
+    const complete = valid.filter(o => !o.hasMore && (
+      (o.count !== null && o.count === o.jobs.length) ||
+      (o.endOfPages && (o.count === null || o.count === o.jobs.length)) ||
+      (domIds.size > 0 && domIds.size === o.jobs.length &&
+        o.jobs.every(job => domIds.has(String(jobKey(job)))))
+    ));
+    if (!complete.length) {
+      const hints = observations.slice(0, 3).map(o =>
+        o.path + " " + o.jobs.length + "/" + (o.count ?? "?") +
+        (o.hasMore ? " more" : "")
+      ).join("; ");
+      throw new Error("Run #" + actual.id +
+        " 的 Job 列表缺少完整性证据，拒绝取消。" +
+        (hints ? " 已发现: " + hints : " 页面未返回 Job 列表"));
+    }
+    const signatures = complete.map(o => JSON.stringify(o.jobs.map(job => [
+      String(jobKey(job)), normalized(jobState(job)),
+      String(jobConclusion(job) || "")
+    ]).sort((a, b) => a[0].localeCompare(b[0]))));
     if (new Set(signatures).size !== 1) {
-      throw new Error("Run #" + actual.id + " 包含冲突的 Job 列表，拒绝取消");
+      throw new Error("Run #" + actual.id + " 存在互相冲突的完整 Job 列表，拒绝取消");
     }
-    const unsafe = candidates[0].jobs.find(job => {
-      const status = normalized(job.status || job.state?.status);
-      const conclusion = job.conclusion ?? job.state?.conclusion;
-      return status !== "QUEUED" || (conclusion != null && conclusion !== "") ||
-        (Array.isArray(job.steps) && job.steps.some(step =>
-          ["IN_PROGRESS","COMPLETED"].includes(normalized(step.status || step.state?.status))));
-    });
-    if (unsafe) {
-      throw new Error("Run #" + actual.id + " 中 Job 已开始/完成或状态不确定（" +
-        String(unsafe.name || unsafe.id) + "），拒绝取消");
+    // A partial list must not introduce unknown/unverified extra jobs.
+    const allowedIds = new Set(complete[0].jobs.map(job => String(jobKey(job))));
+    if (allObserved.some(job => !job || typeof job !== "object" ||
+        jobKey(job) == null || !allowedIds.has(String(jobKey(job))) ||
+        !jobState(job))) {
+      throw new Error("Run #" + actual.id + " 的 Job 列表有未核验条目，拒绝取消");
     }
+
   };
   if (op === "cancel-one") {
     if (!candidate || !Number.isSafeInteger(candidate.id) || candidate.id <= 0 ||
