@@ -18,7 +18,7 @@
         <h1>Actions Sweeper</h1>
         <p>GitHub Actions · 历史排队清理</p>
       </div>
-      <span class="version">v0.1.5</span>
+      <span class="version">v0.1.6</span>
     </header>
 
     <div class="repo" id="repo" aria-live="polite">正在读取当前 GitHub 仓库…</div>
@@ -72,16 +72,8 @@
       <p id="coverageInfo" class="hint"></p>
       <div class="candidateTop"><strong>候选任务</strong><button type="button" id="selectAll" class="link-button">全选 / 取消</button></div>
       <div id="candidateList" class="candidateList" role="group" aria-label="候选 CI Run"></div>
-      <label class="toggle"><input id="dryRun" type="checkbox" checked> Dry Run（只模拟，不发送取消请求）</label>
       <button type="button" id="cancel" class="button warn" disabled>没有候选任务</button>
-      <div id="confirmation" class="confirmation" hidden>
-        <p>即将向 GitHub 发送取消请求。请输入仓库名 <strong id="repoConfirmLabel"></strong> 确认：</p>
-        <input id="repoConfirmInput" type="text" autocomplete="off" placeholder="输入仓库名">
-        <div class="actions">
-          <button type="button" id="confirmCancel" class="button warn" disabled>确认取消</button>
-          <button type="button" id="dismissConfirm" class="button subtle">返回</button>
-        </div>
-      </div>
+      <p class="hint" id="cancelHint">点击后立即逐条核验并提交符合条件的取消请求；不会出现二次确认。无法核验的 Run 会安全停止。</p>
     </section>
 
     <footer>
