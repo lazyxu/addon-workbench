@@ -1,5 +1,6 @@
 import { chooseRuns, gitHubContext, normalizeWorkflow, normalizeBranch } from "./selection.js";
 import { pageOperation } from "./page-operations.js";
+import { verifyCancellationResults } from "./verification.js";
 import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, scanWorkflowPages } from "./scan-policy.js";
 
 (function initializePopup() {
@@ -105,7 +106,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     const count = selectedRuns().length;
     ui.cancel.disabled = busy || count === 0 || snapshot.incomplete === true;
     ui.cancel.textContent = snapshot.incomplete ? "扫描不完整：禁止取消" : count === 0 ?
-      "没有选中的候选任务" : `立即核验并取消 ${count} 条旧 CI`;
+      "没有选中的候选任务" : `取消选中的 ${count} 条旧 Queued CI`;
   }
   function renderResults() {
     const selection = snapshot.selection;
@@ -194,7 +195,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       snapshot = { settings, head, selection, pages: outcome.pages, reason: outcome.reason,
         limited: outcome.limited, incomplete: false };
       renderResults();
-      status(`扫描完成：找到 ${selection.eligible.length} 条待核验旧排队任务。\n取消前还会检查 GitHub Run 和 Job 状态。\n${outcome.reason}\n尚未发送任何取消请求。`);
+      status(`扫描完成：找到 ${selection.eligible.length} 条旧 Queued 任务。\n注意：部分 Job 可能已经开始，点击取消会中断这些 Job。\n${outcome.reason}\n尚未发送任何取消请求。`);
     } catch (error) {
       const partial = error.partialScan;
       if (confirmedHead && partial?.items?.length) {
@@ -238,21 +239,31 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       return;
     }
     const { settings, head } = snapshot;
-    if (settings.workflow !== normalizeWorkflow(ui.workflow.value) || settings.branch !== normalizeBranch(ui.branch.value)) {
-      resetResults(); status("设置已变化，请重新扫描", true); return;
+    if (settings.workflow !== normalizeWorkflow(ui.workflow.value) ||
+        settings.branch !== normalizeBranch(ui.branch.value)) {
+      resetResults();
+      status("设置已变化，请重新扫描", true);
+      return;
     }
     switchBusy(true);
     stopRequested = false;
     let accepted = 0, failed = 0, skipped = 0, stopReason = "";
+    const acceptedRuns = [];
+    let verified = null;
+    let verificationError = "";
     try {
       for (let i = 0; i < runs.length; i++) {
         if (stopRequested) { stopReason = "用户停止"; break; }
         const candidate = runs[i];
-        status(`取消请求 ${i + 1}/${runs.length} · Run #${candidate.id}\n已接受 ${accepted} · 失败 ${failed}`);
+        status(`取消请求 ${i + 1}/${runs.length} · Run #${candidate.id}\nGitHub 已接受 ${accepted} · 失败 ${failed}`);
         try {
-          const result = await requestPage({ op: "cancel-one", ...settings, expectedHead: head, candidate });
-          if (result.accepted) accepted++;
-          else {
+          const result = await requestPage({
+            op: "cancel-one", ...settings, expectedHead: head, candidate
+          });
+          if (result.accepted) {
+            accepted++;
+            acceptedRuns.push(candidate);
+          } else {
             failed++;
             if (result.authOrRateLimited) {
               stopReason = `HTTP ${result.status}：授权或限流，停止后续操作`;
@@ -267,14 +278,43 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
         if (i + 1 < runs.length) await delay(600);
       }
     } finally {
+      if (acceptedRuns.length) {
+        try {
+          status(`已向 GitHub 提交 ${acceptedRuns.length} 条取消请求，开始核验实际终态…`);
+          // Read-only status verification reuses the same logged-in github.com
+          // workflow pages. It never sends another cancellation request.
+          verified = await verifyCancellationResults(acceptedRuns,
+            page => requestPage({ op: "page", ...settings, page }), {
+              rounds: 4, maxPage: settings.maxPages,
+              pause: () => delay(2500), shouldStop: () => stopRequested,
+              onProgress: progress => status(
+                `取消终态复查 ${progress.round}/4：GitHub 已接受 ${progress.total}，` +
+                `明确 Cancelled ${progress.confirmed}，其他终态 ${progress.finishedOther}，` +
+                `尚未确认 ${progress.unconfirmed}…`
+              )
+            });
+        } catch (error) {
+          verificationError = errorText(error);
+        }
+      }
       switchBusy(false);
       resetResults();
-      const summary = `操作结束：GitHub 已接受 ${accepted}，响应失败 ${failed}，安全停止 ${skipped}。`;
-      status(summary + (stopReason ? `\n${stopReason}` : "") +
-        "\n已接受不等于最终变为 Cancelled；请在 GitHub 检查终态。", Boolean(stopReason));
-      await saveHistory({ repo: `${settings.owner}/${settings.repo}`, workflow: settings.workflow,
+      const header = `操作结束：GitHub 已接受 ${accepted}，响应失败 ${failed}，安全停止 ${skipped}。`;
+      const state = verified ?
+        `\n已确认 Cancelled ${verified.confirmed}；其他终态 ${verified.finishedOther}；仍未确认 ${verified.unconfirmed}。` :
+        (accepted ? "\n已接受取消请求，但还没有可靠的最终状态。" : "\n没有发送成功的取消请求。");
+      const note = verified?.unconfirmed ?
+        "\n仍未确认的 Run 不能算取消成功，请在 GitHub Actions 核对。" : "";
+      status(header + state + note + (stopReason ? "\n" + stopReason : "") +
+        (verificationError ? "\n终态检查失败：" + verificationError : ""), Boolean(stopReason || verificationError));
+      await saveHistory({
+        repo: `${settings.owner}/${settings.repo}`, workflow: settings.workflow,
         branch: settings.branch, time: new Date().toISOString(), total: runs.length,
-        accepted, failed, skipped, stopReason });
+        accepted, failed, skipped, stopReason,
+        confirmedCancelled: verified?.confirmed ?? 0,
+        otherTerminal: verified?.finishedOther ?? 0,
+        unconfirmed: verified?.unconfirmed ?? accepted
+      });
     }
   }
 
@@ -307,7 +347,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     if (!sweepHistory.length) { ui.historyPanel.textContent = "还没有取消操作历史。"; return; }
     for (const item of sweepHistory.slice(0, 8)) {
       const div = document.createElement("div"); div.className = "historyEntry";
-      div.textContent = `${new Date(item.time).toLocaleString()} · ${item.repo}\n已接受 ${item.accepted}/${item.total}，失败 ${item.failed}`;
+      div.textContent = `${new Date(item.time).toLocaleString()} · ${item.repo}\n已接受 ${item.accepted}/${item.total}，确认取消 ${item.confirmedCancelled ?? "未核验"}，失败 ${item.failed}`;
       ui.historyPanel.append(div);
     }
   });
