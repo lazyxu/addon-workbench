@@ -158,8 +158,8 @@ export async function pageOperation(input) {
       // GitHub uses WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS for the *timer*
       // even when the run text says "Queued". That field is NOT proof of
       // any job actually starting. Only the user-facing timing text can
-      // contradict the queued label; REST job verification is authoritative
-      // before a cancellation request is sent.
+      // contradict the queued label; same-origin job verification occurs
+      // immediately before any cancellation request.
       const timingText = String(run?.timing?.text || "").trim();
       const hasStarted = /\bRUNNING\b|\bSTARTING\b|\bSTARTED\b|IN[\s_-]*PROGRESS/i.test(timingText);
       const queueObserved = normalizedStatus === "QUEUED";
@@ -198,52 +198,78 @@ export async function pageOperation(input) {
     return { branch: candidates.find(x => x && !/[\s<>]/.test(x)) || null };
   }
   if (op === "page") return await parsePage(page);
-  // GitHub can show a workflow as queued while earlier jobs are already
-  // running/completed. Verify the public REST run and *every* visible job
-  // immediately before PUT; an unverifiable run must never be cancelled.
+  // Only GitHub's logged-in, same-origin HTML pages are used. Never call
+  // a cross-origin REST API: browser login does not grant API authorization.
+  // Job verification is deliberately fail-closed if the GitHub UI changes.
   const verifyNeverStarted = async actual => {
-    const apiRoot = `https://api.github.com/repos/${owner}/${repo}/actions/runs/${actual.id}`;
-    const fetchJSON = async url => {
-      let response;
-      try {
-        response = await fetch(url, {
-          credentials: "omit", cache: "no-store",
-          headers: { accept: "application/vnd.github+json" }
-        });
-      } catch (cause) {
-        throw new Error(`无法访问 GitHub REST 进行 Job 核验：${cause?.message || String(cause)}；拒绝取消`);
+    const html = await read(root + "/actions/runs/" + actual.id);
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const parsed = [];
+    for (const script of doc.querySelectorAll('script[type="application/json"]')) {
+      try { parsed.push(JSON.parse(script.textContent)); } catch { /* unrelated JSON */ }
+    }
+    if (!parsed.length) {
+      throw new Error("Run #" + actual.id + " 缺少 GitHub 页面 JSON，拒绝取消");
+    }
+    const normalized = value => String(value || "")
+      .replace(/^(?:WORKFLOW_RUN_|WORKFLOW_JOB_|CHECK_RUN_|JOB_)?STATUS_/i, "")
+      .trim().toUpperCase();
+    const matches = [];
+    const visit = (node, depth = 0) => {
+      if (!node || typeof node !== "object" || depth > 16) return;
+      if (Array.isArray(node)) {
+        for (const item of node) visit(item, depth + 1);
+        return;
       }
-      if (!response.ok) {
-        throw new Error(`GitHub Job 安全核验失败：HTTP ${response.status}；无 Token 只能核验公开仓库，拒绝取消`);
-      }
-      try { return await response.json(); } catch {
-        throw new Error("GitHub Job 核验返回非法 JSON，拒绝取消");
+      for (const [key, value] of Object.entries(node)) {
+        if (/^(?:jobs|workflowJobs|checkRuns)$/i.test(key) && value) {
+          const jobs = Array.isArray(value) ? value :
+            (Array.isArray(value.nodes) ? value.nodes :
+              (Array.isArray(value.items) ? value.items : null));
+          const count = Number(
+            Array.isArray(value) ?
+              (node.jobsCount ?? node.jobCount ?? node.totalJobs ?? node.totalCount ?? node.total_count) :
+              (value.totalCount ?? value.total_count ?? value.count)
+          );
+          if (jobs && Number.isSafeInteger(count) && count > 0 && count <= 100 &&
+              jobs.length === count) {
+            matches.push({ jobs, count });
+          }
+        }
+        visit(value, depth + 1);
       }
     };
-    const remote = await fetchJSON(apiRoot);
-    const workflowPath = `.github/workflows/${workflow}`;
-    if (remote?.id !== actual.id || remote?.head_branch !== branch ||
-        String(remote?.head_sha || "").toLowerCase() !== actual.sha ||
-        (remote?.path !== workflowPath &&
-         !String(remote?.path || "").startsWith(workflowPath + "@")) ||
-        remote?.status !== "queued" || remote?.conclusion != null ||
-        remote?.run_attempt !== 1) {
-      throw new Error(`Run #${actual.id} 不再是首次排队的目标工作流，拒绝取消`);
-    }
-    const page = await fetchJSON(apiRoot + "/jobs?per_page=100");
-    if (!Number.isSafeInteger(page?.total_count) || page.total_count < 0 ||
-        page.total_count > 100 || !Array.isArray(page.jobs) ||
-        page.jobs.length !== page.total_count) {
-      throw new Error(`Run #${actual.id} 的 Job 列表不完整或超过 100 条，拒绝取消`);
-    }
-    const startedJob = page.jobs.find(job => (
-      !Number.isSafeInteger(job?.id) || job.id <= 0 ||
-      job.status !== "queued" || job.conclusion != null ||
-      (Array.isArray(job.steps) && job.steps.some(step =>
-        step.status === "in_progress" || step.status === "completed"))
+    for (const tree of parsed) visit(tree);
+    // We require a single, complete job collection (or identical repeated
+    // copies). A partial or ambiguous UI response is not evidence of safety.
+    const candidates = matches.filter(({jobs}) => jobs.every(job =>
+      job && typeof job === "object" &&
+      (typeof job.name === "string" || typeof job.id === "string" ||
+        Number.isSafeInteger(job.id)) &&
+      Boolean(job.status || job.state?.status)
     ));
-    if (startedJob) {
-      throw new Error(`Run #${actual.id} 的 Job 已开始/完成或状态不确定（${String(startedJob.name || startedJob.id)}），禁止取消`);
+    if (!candidates.length) {
+      throw new Error("Run #" + actual.id +
+        " 的 Job 列表无法从已登录 GitHub 页面完整核验，拒绝取消");
+    }
+    const signatures = candidates.map(({jobs}) => JSON.stringify(jobs.map(job => [
+      String(job.id ?? job.databaseId ?? job.name),
+      normalized(job.status || job.state?.status),
+      String(job.conclusion || job.state?.conclusion || "")
+    ]).sort((a,b) => a[0].localeCompare(b[0]))));
+    if (new Set(signatures).size !== 1) {
+      throw new Error("Run #" + actual.id + " 包含冲突的 Job 列表，拒绝取消");
+    }
+    const unsafe = candidates[0].jobs.find(job => {
+      const status = normalized(job.status || job.state?.status);
+      const conclusion = job.conclusion ?? job.state?.conclusion;
+      return status !== "QUEUED" || (conclusion != null && conclusion !== "") ||
+        (Array.isArray(job.steps) && job.steps.some(step =>
+          ["IN_PROGRESS","COMPLETED"].includes(normalized(step.status || step.state?.status))));
+    });
+    if (unsafe) {
+      throw new Error("Run #" + actual.id + " 中 Job 已开始/完成或状态不确定（" +
+        String(unsafe.name || unsafe.id) + "），拒绝取消");
     }
   };
   if (op === "cancel-one") {
