@@ -14,6 +14,10 @@ Open any `github.com/OWNER/REPO` page and click the browser toolbar button. The 
 - No PR runs from other branches, running jobs, or completed jobs are cancelled; no branches are deleted.
 - No personal access token, remote extension code, or third-party telemetry is used.
 
+## Live scan counters
+
+After each fully validated page, the popup updates the cumulative scanned Run count, old Run count, GitHub-queued status count, and estimated cancellable candidate count. These are **scanned-page** counts, not all workflow history. GitHub can label a workflow run as queued while some jobs have already started; the queue count is deliberately separate from cancellation eligibility, which also checks page timing evidence, full metadata, branch/HEAD, and a per-run recheck. The candidates are provisional until the scan completes. The Stop button is available during scanning and leaves already validated pages in a read-only preview. The fast terminal-page stopping rule uses validated route JSON even when GitHub has not pre-rendered run links in the HTML; unexpected status values never count as terminal.
+
 ## Limitations
 
 GitHub's internal page JSON and same-origin `/suites/{id}/cancel` endpoint are not stable public APIs. GitHub changes can break the extension; in that situation it refuses the operation. There is an unavoidable race between last-minute status validation and an HTTP cancellation request. Keep the popup open until a batch finishes. Verify final run states in GitHub Actions afterwards.
