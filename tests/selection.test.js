@@ -50,3 +50,24 @@ test('validates workflow filenames and Git branches', () => {
   assert.throws(() => normalizeBranch('foo..bar'), /分支/);
   assert.throws(() => normalizeBranch('main branch'), /分支/);
 });
+
+
+test('unknown terminal metadata never becomes the protected latest-old or a candidate', () => {
+  const result = chooseRuns([
+    run(9, null, false, null),
+    run(8, head, true, '2026-01-05T00:00:00Z'),
+    run(7, old, true, '2026-01-04T00:00:00Z'),
+    run(6, old, true, '2026-01-03T00:00:00Z'),
+    run(5, earlier, false, '2026-01-02T00:00:00Z')
+  ], head);
+  assert.equal(result.total, 5);
+  assert.equal(result.skippedMetadata, 1);
+  assert.equal(result.currentHead, 1);
+  assert.equal(result.protectedLatestOld.id, 7);
+  assert.deepEqual(result.eligible.map(x => x.id), [6]);
+  assert.equal(result.older, 3);
+});
+
+test('selection rejects unverified queued run even when supplied by another caller', () => {
+  assert.throws(() => chooseRuns([run(3, null, true, null)], head), /缺少已验证的 SHA/);
+});

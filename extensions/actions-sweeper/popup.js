@@ -116,7 +116,9 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       `保护最近一次旧 Run #${selection.protectedLatestOld.id}；当前 HEAD ${snapshot.head.slice(0, 12)} 全部保护。` :
       `当前 HEAD ${snapshot.head.slice(0, 12)} 全部保护；未发现旧 Run。`;
     ui.coverageInfo.textContent = `扫描 ${snapshot.pages} 页（${snapshot.reason}）· ` +
-      `跳过运行中/完成 ${selection.skippedNonQueued}，缺少取消权限/链接 ${selection.skippedNoCancelLink}。`;
+      `跳过运行中/完成 ${selection.skippedNonQueued}，缺少取消权限/链接 ${selection.skippedNoCancelLink}。` +
+      (selection.skippedMetadata ?
+        ` 另有 ${selection.skippedMetadata} 条终态 Run 缺少提交或时间字段，已排除旧 Run 统计及取消候选。` : "");
     ui.candidateList.replaceChildren();
     for (const item of selection.eligible) {
       const label = document.createElement("label"); label.className = "candidate";

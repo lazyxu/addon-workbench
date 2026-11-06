@@ -60,6 +60,44 @@ export async function pageOperation(input) {
     }
     return null;
   };
+  // GitHub's UI JSON can omit the optional commit link on terminal runs.
+  // Only repository-scoped commit URLs and explicit full SHAs are trusted.
+  const shaFromLink = (value, rootPattern) => {
+    if (typeof value !== "string" || !value) return null;
+    let url;
+    try { url = new URL(value, location.origin); } catch { return null; }
+    if (url.origin !== location.origin) return null;
+    return url.pathname.match(new RegExp(`^${rootPattern}/commit/([0-9a-f]{40})/?$`, "i"))?.[1]?.toLowerCase() || null;
+  };
+  const exactSha = value => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value) ?
+    value.toLowerCase() : null;
+  const runSha = (run, rootPattern) => {
+    const values = [
+      shaFromLink(run?.description?.linkUrl, rootPattern),
+      shaFromLink(run?.headCommit?.url, rootPattern),
+      exactSha(run?.headSha),
+      exactSha(run?.head_sha),
+      exactSha(run?.headCommit?.oid),
+      exactSha(run?.headCommit?.sha),
+      exactSha(run?.commit?.oid),
+      exactSha(run?.commit?.sha),
+      exactSha(run?.head_commit?.id)
+    ].filter(Boolean);
+    // Conflicting metadata must never make a queued run eligible.
+    return values.length && values.every(value => value === values[0]) ? values[0] : null;
+  };
+  const runCreatedAt = run => {
+    for (const value of [run?.createdAt?.timestamp, run?.createdAt?.isoDate,
+      run?.createdAt?.date, run?.created_at]) {
+      if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) &&
+          Number.isFinite(Date.parse(value))) return value;
+      if (typeof value === "number" && Number.isSafeInteger(value)) {
+        const ms = value < 1e11 ? value * 1000 : value;
+        if (ms >= 946684800000 && ms < 4102444800000) return new Date(ms).toISOString();
+      }
+    }
+    return null;
+  };
   const parsePage = async pageNumber => {
     checkBranch();
     if (!/^[\w.-]+\.ya?ml$/i.test(workflow || "") || workflow.includes("..")) {
@@ -90,45 +128,49 @@ export async function pageOperation(input) {
     if (domIds.size && (domIds.size !== jsonIds.size || [...domIds].some(x => !jsonIds.has(x)))) {
       throw new Error(`第 ${pageNumber} 页 DOM 与 JSON Run 列表不一致，安全停止`);
     }
-    const items = [];
-    const statuses = {};
-    for (const run of rows) {
-      const state = String(run?.state?.status || "UNKNOWN");
-      statuses[state.replace(/^WORKFLOW_RUN_STATUS_/, "")] =
-        (statuses[state.replace(/^WORKFLOW_RUN_STATUS_/, "")] || 0) + 1;
-      if (run?.branch?.name !== targetRef || run?.workflowFilePath !== targetPath) {
-        throw new Error(`第 ${pageNumber} 页返回了不匹配的分支或工作流，安全停止`);
-      }
-      const id = Number(run?.id);
-      const sha = String(run?.description?.linkUrl || "")
-        .match(new RegExp(`^${rootPattern}/commit/([0-9a-f]{40})$`, "i"))?.[1]?.toLowerCase();
-      const suite = String(run?.actions?.cancelUrl || "")
-        .match(new RegExp(`^${rootPattern}/suites/(\\d+)/cancel$`))?.[1] || null;
-      const created = run?.createdAt?.timestamp;
-      if (!Number.isSafeInteger(id) || id <= 0 || !sha || !Number.isFinite(Date.parse(created))) {
-        throw new Error(`第 ${pageNumber} 页 Run 数据不完整：${String(run?.id)}`);
-      }
-      const timing = [run?.timing?.text, run?.timing?.kind].filter(Boolean).join(" ");
-      const hasStarted = /IN[_\s-]*PROGRESS|RUNNING|STARTING|IN_PROGRESS/i.test(timing);
-      items.push({ id, sha, suite, created, state, queued: state === "WORKFLOW_RUN_STATUS_QUEUED" && !hasStarted,
-        page: pageNumber });
-    }
-    // The embedded workflow-run JSON is authoritative for each run's state.
-    // Do not scan the entire page for generic "Queued"/"Running" strings:
-    // hidden navigation, unrelated components, and stale timing labels can
-    // otherwise prevent terminal-page detection indefinitely.
     const terminalStatuses = new Set([
       "WORKFLOW_RUN_STATUS_COMPLETED",
       "WORKFLOW_RUN_STATUS_CANCELLED",
       "WORKFLOW_RUN_STATUS_CANCELED"
     ]);
+    const items = [];
+    const statuses = {};
+    for (const run of rows) {
+      const state = String(run?.state?.status || "UNKNOWN");
+      const normalizedStatus = state.replace(/^WORKFLOW_RUN_STATUS_/, "");
+      statuses[normalizedStatus] = (statuses[normalizedStatus] || 0) + 1;
+      if (run?.branch?.name !== targetRef || run?.workflowFilePath !== targetPath) {
+        throw new Error(`第 ${pageNumber} 页返回了不匹配的分支或工作流，安全停止`);
+      }
+      const id = Number(run?.id);
+      const sha = runSha(run, rootPattern);
+      const suite = String(run?.actions?.cancelUrl || "")
+        .match(new RegExp(`^${rootPattern}/suites/(\\d+)/cancel$`))?.[1] || null;
+      const created = runCreatedAt(run);
+      const terminal = terminalStatuses.has(state);
+      const metadataIncomplete = !sha || !created;
+      if (!Number.isSafeInteger(id) || id <= 0 || (!terminal && metadataIncomplete)) {
+        throw new Error(`第 ${pageNumber} 页 Run 数据不完整：${String(run?.id)}`);
+      }
+      const timing = [run?.timing?.text, run?.timing?.kind].filter(Boolean).join(" ");
+      const hasStarted = /IN[_\s-]*PROGRESS|RUNNING|STARTING|IN_PROGRESS/i.test(timing);
+      items.push({
+        id, sha: metadataIncomplete ? null : sha, suite, created: metadataIncomplete ? null : created,
+        state, queued: !metadataIncomplete && state === "WORKFLOW_RUN_STATUS_QUEUED" && !hasStarted,
+        metadataIncomplete, page: pageNumber
+      });
+    }
+    // The embedded workflow-run JSON is authoritative for each run's state.
+    // Do not scan the entire page for generic "Queued"/"Running" strings:
+    // hidden navigation, unrelated components, and stale timing labels can
+    // otherwise prevent terminal-page detection indefinitely.
     const allRunsTerminal = rows.every(run => terminalStatuses.has(run?.state?.status));
     const domValidated = domIds.size === jsonIds.size &&
       [...domIds].every(id => jsonIds.has(id));
     const terminalPage = rows.length === 25 && allRunsTerminal && domValidated;
     return { page: pageNumber, total: rows.length, items, statuses,
       terminalPage, lastPage: rows.length < 25, domValidated,
-      allRunsTerminal };
+      allRunsTerminal, incompleteTerminalRuns: items.filter(item => item.metadataIncomplete).length };
   };
   if (op === "head") return { head: await getHead() };
   if (op === "default-branch") {

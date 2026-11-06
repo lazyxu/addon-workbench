@@ -14,13 +14,23 @@ export function chooseRuns(items, headSha) {
     }
   }
   const runs = [...byId.values()];
-  const older = runs.filter(x => x.sha?.toLowerCase() !== head)
+  const hasConfirmedMetadata = item => typeof item.sha === "string" &&
+    /^[0-9a-f]{40}$/i.test(item.sha) && typeof item.created === "string" &&
+    Number.isFinite(Date.parse(item.created));
+  if (runs.some(item => item.queued && !hasConfirmedMetadata(item))) {
+    throw new Error("排队任务缺少已验证的 SHA 或创建时间，拒绝选择");
+  }
+  // Terminal entries without metadata remain visible in the scanned total,
+  // but cannot be mistaken for the newest older run or a cancellation target.
+  const confirmed = runs.filter(hasConfirmedMetadata);
+  const older = confirmed.filter(x => x.sha.toLowerCase() !== head)
     .sort((a, b) => Date.parse(b.created) - Date.parse(a.created) || b.id - a.id);
   const protectedLatestOld = older[0] ?? null;
   const eligible = older.slice(1).filter(x => x.queued === true && /^\d+$/.test(x.suite || ""));
   return {
     total: runs.length,
-    currentHead: runs.filter(x => x.sha?.toLowerCase() === head).length,
+    currentHead: confirmed.filter(x => x.sha.toLowerCase() === head).length,
+    skippedMetadata: runs.length - confirmed.length,
     older: older.length,
     protectedLatestOld,
     eligible,
