@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Actions Sweeper",
   "short_name": "Actions Sweeper",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Safely review and cancel stale queued GitHub Actions workflow runs using your existing GitHub session.",
   "minimum_chrome_version": "96",
   "permissions": ["activeTab", "scripting", "storage"],
