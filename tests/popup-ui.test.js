@@ -30,8 +30,8 @@ test("cancellation is wired directly to a single click, never started by scannin
   assert.doesNotMatch(scanBody, /runCancellation\(|op: "cancel-one"|\/suites\//);
 });
 
-test("manifest and popup explicitly agree on v0.1.6", () => {
+test("manifest and popup explicitly agree on v0.1.7", () => {
   const manifest = JSON.parse(read("manifest.json"));
   assert.equal(manifest.version, "0.1.7");
-  assert.match(read("popup.html"), /class="version">v0\.1\.6</);
+  assert.match(read("popup.html"), /class="version">v0\.1\.7</);
 });
