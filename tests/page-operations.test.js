@@ -253,13 +253,15 @@ test('fully terminal page remains eligible for fast stop with optional metadata 
 }));
 
 
-test('queue label and cancellable confidence are distinct when timing reports running', async () => withPage({
+test('original selection permits workflow QUEUED even with Running timing text', async () => withPage({
   rows: [{ ...row('WORKFLOW_RUN_STATUS_QUEUED', 'Running'), id:42196976014 }]
 }, async () => {
   const page = await pageOperation({op:'page', ...input, page:1});
   assert.equal(page.items[0].queueObserved, true);
   assert.equal(page.items[0].startedEvidence, true);
-  assert.equal(page.items[0].queued, false);
+  // Workflow queue state is authoritative for original-script cancellation.
+  // The UI must warn this can interrupt a Job that has started.
+  assert.equal(page.items[0].queued, true);
   assert.equal(page.terminalPage, false);
 }));
 
@@ -308,77 +310,70 @@ test('unknown state does not stop fast scan prematurely', async () => withPage({
 }));
 
 
-test('never cancels when a queued workflow has a completed job in same-origin HTML', async () => withPage({
+test('restored original behavior: a QUEUED workflow with completed jobs is cancellable', async () => withPage({
+  rows:[{...row('WORKFLOW_RUN_STATUS_QUEUED','Queued'),
+    timing:{text:'Queued',kind:'WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS'}}],
   jobsResponse:{totalCount:2,nodes:[
     {id:1,name:'pr-scope',status:'completed',conclusion:'success'},
-    {id:2,name:'android-native',status:'queued',conclusion:null}
+    {id:2,name:'build',status:'queued',conclusion:null}
   ]}
-}, async ctx => {
-  const result = await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.__actionsSweeperError,true);
-  assert.match(result.message,/Job 已开始\/完成/);
-  assert.equal(ctx.getSentCancel(),0);
-  assert.equal(ctx.detailReads.length,1);
-  assert.equal(ctx.detailReads[0].path,'/example/repository/actions/runs/123');
-  assert.equal(ctx.detailReads[0].options.credentials,'same-origin');
-  assert.ok(ctx.reads.every(call => !String(call.path).startsWith('https://api.github.com/')));
-}));
-
-test('never cancels a queued workflow with in-progress job', async () => withPage({
-  jobsResponse:{totalCount:1,nodes:[{id:2,name:'compile',status:'in_progress',conclusion:null}]}
-}, async ctx => {
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.__actionsSweeperError,true);
-  assert.equal(ctx.getSentCancel(),0);
-}));
-
-test('never cancels if GitHub page is inaccessible or job metadata incomplete', async () => {
-  for (const props of [
-    {detailsStatus:403},
-    {detailsStatus:429},
-    {detailJSON:{payload:{workflowRunJobsRoute:{jobs:[]}}}},
-    {jobsResponse:{totalCount:101,nodes:[]}},
-    {jobsResponse:{totalCount:2,nodes:[{id:1,name:'job',status:'queued'}]}},
-    {jobsResponse:{nodes:[{id:1,name:'job',status:'queued'}]}},
-    {jobsResponse:{totalCount:1,nodes:[{id:1,name:'job'}]}},
-    {detailJSON:{unrelated:{message:'Queued'}}}
-  ]) {
-    await withPage(props, async ctx=>{
-      const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-      assert.equal(result.__actionsSweeperError,true);
-      assert.equal(ctx.getSentCancel(),0);
-    });
-  }
-});
-
-test('same-origin queued jobs allow preflight without REST', async () => withPage({
-  jobsResponse:{totalCount:1,nodes:[{
-    id:321,name:'waiting for runner',status:'queued',conclusion:null,
-    started_at:stamp
-  }]}
 }, async ctx => {
   const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
   assert.equal(result.accepted,true);
   assert.equal(ctx.getSentCancel(),1);
-  assert.equal(ctx.detailReads.length,1);
-  assert.equal(ctx.detailReads[0].options.credentials,'same-origin');
-  assert.ok(ctx.reads.every(call => !String(call.path).startsWith('https://api.github.com/')));
+  assert.equal(ctx.detailReads.length,0);
+  assert.equal(ctx.reads.filter(r=>r.options?.method==='PUT').length,1);
+  assert.ok(ctx.reads.every(r=>String(r.path).startsWith('/example/repository/')));
 }));
 
-test('conflicting job lists and completed steps stop cancellation', async () => {
-  for (const detailJSON of [
-    {a:{jobs:{totalCount:1,nodes:[{id:1,name:'x',status:'queued'}]}},
-     b:{jobs:{totalCount:1,nodes:[{id:1,name:'x',status:'completed'}]}}},
-    {jobs:{totalCount:1,nodes:[{id:1,name:'x',status:'queued',
-      steps:[{status:'completed'}]}]}}
-  ]) {
-    await withPage({detailJSON}, async ctx=>{
-      const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-      assert.equal(result.__actionsSweeperError,true);
-      assert.equal(ctx.getSentCancel(),0);
-    });
-  }
-});
+test('real failure case: lack of job detail does not prevent original QUEUED cancel', async () => withPage({
+  rows:[{...row('WORKFLOW_RUN_STATUS_QUEUED','Queued'),id:42208840500,
+    timing:{text:'Queued',kind:'WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS'}}],
+  detailJSON:{unrelated:{message:'No job list'}}
+}, async ctx => {
+  const actualCandidate={...candidate,id:42208840500};
+  const result=await pageOperation({op:'cancel-one',...input,
+    expectedHead:currentSha,candidate:actualCandidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+  assert.equal(ctx.detailReads.length,0);
+}));
+
+test('original-script behavior does not cancel a completed workflow', async () => withPage({
+  rows:[{...row('WORKFLOW_RUN_STATUS_COMPLETED','1m 34s')}]
+}, async ctx => {
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('current HEAD protection holds even if a workflow run still says QUEUED', async () => withPage({
+  rows:[{...row('WORKFLOW_RUN_STATUS_QUEUED','Queued'),
+    description:{linkUrl:'/example/repository/commit/'+currentSha}}]
+}, async ctx => {
+  const candidateHead={...candidate,sha:currentSha};
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate:candidateHead});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('page result exposes a cancellation conclusion when embedded GitHub JSON provides it', async () => withPage({
+  rows:[{...row('WORKFLOW_RUN_STATUS_COMPLETED','1m 00s'),
+    state:{status:'WORKFLOW_RUN_STATUS_COMPLETED',
+      conclusion:'WORKFLOW_RUN_CONCLUSION_CANCELLED'}}]
+}, async () => {
+  const result=await pageOperation({op:'page',...input,page:1});
+  assert.equal(result.items[0].state,'WORKFLOW_RUN_STATUS_COMPLETED');
+  assert.equal(result.items[0].conclusion,'WORKFLOW_RUN_CONCLUSION_CANCELLED');
+}));
+
+test('cancel requests remain in the logged-in github.com origin', async () => withPage({}, async ctx => {
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.ok(ctx.reads.every(x=>String(x.path).startsWith('/example/repository/') &&
+    x.options.credentials==='same-origin'));
+  assert.equal(ctx.detailReads.length,0);
+}));
 
 test('GitHub real queue timer: Queued text with IN_PROGRESS kind is still queued', async () => withPage({
   rows: [{
@@ -430,100 +425,3 @@ test('real page-one distribution 21 queued + 4 completed yields nonzero initial 
   assert.equal(selection.skippedNonQueued,4);
 }));
 
-test('queued workflow timer kind cannot bypass job-level refusal if a job completed', async () => withPage({
-  rows:[{ ...row('WORKFLOW_RUN_STATUS_QUEUED','Queued'),
-    timing:{text:'Queued',kind:'WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS'}
-  }],
-  jobsResponse:{totalCount:2,nodes:[
-    {id:1,name:'pr-scope',status:'completed',conclusion:'success'},
-    {id:2,name:'build',status:'queued',conclusion:null}
-  ]}
-}, async ctx => {
-  const snapshot=await pageOperation({op:'page',...input,page:1});
-  assert.equal(snapshot.items[0].queued,true);
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.__actionsSweeperError,true);
-  assert.match(result.message,/Job 已开始/);
-  assert.equal(ctx.getSentCancel(),0);
-}));
-
-
-test('accepts complete same-origin job array when end-of-pages is explicit without totalCount', async () => withPage({
-  detailJSON:{payload:{workflowRunJobsRoute:{jobs:{
-    edges:[{node:{id:1,name:'setup',status:'queued'}},{node:{id:2,name:'build',status:'queued'}}],
-    pageInfo:{hasNextPage:false}
-  }}}}
-}, async ctx=>{
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.accepted,true);
-  assert.equal(ctx.getSentCancel(),1);
-  assert.equal(ctx.detailReads.length,1);
-}));
-
-test('accepts complete same-origin job array when count is on parent container', async () => withPage({
-  detailJSON:{payload:{workflowRunJobsRoute:{
-    jobsCount:2,
-    jobs:[{id:1,name:'setup',status:'queued'},{id:2,name:'compile',status:'queued'}]
-  }}}
-}, async ctx=>{
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.accepted,true);
-  assert.equal(ctx.getSentCancel(),1);
-}));
-
-test('accepts job list when rendered job anchors confirm full coverage without count', async () => withPage({
-  detailJSON:{payload:{workflowRunJobsRoute:{
-    jobs:[{id:1001,name:'setup',status:'queued'},{id:1002,name:'build',status:'queued'}]
-  }}},
-  detailJobLinks:[1001,1002]
-}, async ctx=>{
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.accepted,true);
-  assert.equal(ctx.getSentCancel(),1);
-}));
-
-test('rejects job list with missing totalCount and only partial rendered links', async () => withPage({
-  detailJSON:{payload:{workflowRunJobsRoute:{
-    jobs:[{id:1001,name:'setup',status:'queued'},{id:1002,name:'build',status:'queued'}]
-  }}},
-  detailJobLinks:[1001]
-}, async ctx=>{
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.__actionsSweeperError,true);
-  assert.match(result.message,/缺少完整性证据/);
-  assert.equal(ctx.getSentCancel(),0);
-}));
-
-test('rejects apparent queued subset if a second incomplete list exposes a started job', async () => withPage({
-  detailJSON:{payload:{
-    complete:{jobs:{totalCount:1,nodes:[{id:1,name:'build',status:'queued'}]}},
-    additional:{jobs:[{id:2,name:'pr-scope',status:'completed'}]}
-  }}
-}, async ctx=>{
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.__actionsSweeperError,true);
-  assert.match(result.message,/Job 已开始/);
-  assert.equal(ctx.getSentCancel(),0);
-}));
-
-test('rejects lists that explicitly have more pages even if length matches count', async () => withPage({
-  detailJSON:{payload:{jobs:{
-    totalCount:1,
-    nodes:[{id:1,name:'build',status:'queued'}],
-    pageInfo:{hasNextPage:true}
-  }}}
-}, async ctx=>{
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.__actionsSweeperError,true);
-  assert.equal(ctx.getSentCancel(),0);
-}));
-
-test('job detail request remains within logged-in github.com origin for fallback shapes', async () => withPage({
-  detailJSON:{payload:{jobs:{nodes:[{id:1,name:'build',status:'queued'}],pageInfo:{hasNextPage:false}}}}
-}, async ctx=>{
-  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
-  assert.equal(result.accepted,true);
-  assert.equal(ctx.getSentCancel(),1);
-  assert.ok(ctx.reads.every(r=>String(r.path).startsWith('/example/repository/') &&
-    r.options.credentials==='same-origin'));
-}));
