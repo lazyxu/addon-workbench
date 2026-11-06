@@ -128,16 +128,19 @@ export async function pageOperation(input) {
     if (domIds.size && (domIds.size !== jsonIds.size || [...domIds].some(x => !jsonIds.has(x)))) {
       throw new Error(`第 ${pageNumber} 页 DOM 与 JSON Run 列表不一致，安全停止`);
     }
+    // The UI sometimes reports a conclusion (SUCCESS/FAILURE) rather than
+    // COMPLETED. Normalize the visible state without treating UNKNOWN as done.
+    const normalizeStatus = value => typeof value === "string" ?
+      value.replace(/^WORKFLOW_RUN_STATUS_/i, "").trim().replace(/[\s-]+/g, "_").toUpperCase() : "UNKNOWN";
     const terminalStatuses = new Set([
-      "WORKFLOW_RUN_STATUS_COMPLETED",
-      "WORKFLOW_RUN_STATUS_CANCELLED",
-      "WORKFLOW_RUN_STATUS_CANCELED"
+      "COMPLETED", "CANCELLED", "CANCELED", "SUCCESS", "FAILURE",
+      "FAILED", "SKIPPED", "NEUTRAL", "TIMED_OUT", "STALE", "ACTION_REQUIRED"
     ]);
     const items = [];
     const statuses = {};
     for (const run of rows) {
-      const state = String(run?.state?.status || "UNKNOWN");
-      const normalizedStatus = state.replace(/^WORKFLOW_RUN_STATUS_/, "");
+      const state = String(run?.state?.status || run?.status || "UNKNOWN");
+      const normalizedStatus = normalizeStatus(state);
       statuses[normalizedStatus] = (statuses[normalizedStatus] || 0) + 1;
       if (run?.branch?.name !== targetRef || run?.workflowFilePath !== targetPath) {
         throw new Error(`第 ${pageNumber} 页返回了不匹配的分支或工作流，安全停止`);
@@ -147,16 +150,20 @@ export async function pageOperation(input) {
       const suite = String(run?.actions?.cancelUrl || "")
         .match(new RegExp(`^${rootPattern}/suites/(\\d+)/cancel$`))?.[1] || null;
       const created = runCreatedAt(run);
-      const terminal = terminalStatuses.has(state);
+      const terminal = terminalStatuses.has(normalizedStatus);
       const metadataIncomplete = !sha || !created;
       if (!Number.isSafeInteger(id) || id <= 0 || (!terminal && metadataIncomplete)) {
         throw new Error(`第 ${pageNumber} 页 Run 数据不完整：${String(run?.id)}`);
       }
       const timing = [run?.timing?.text, run?.timing?.kind].filter(Boolean).join(" ");
-      const hasStarted = /IN[_\s-]*PROGRESS|RUNNING|STARTING|IN_PROGRESS/i.test(timing);
+      const hasStarted = /IN[_\s-]*PROGRESS|RUNNING|STARTING/i.test(timing);
+      const queueObserved = normalizedStatus === "QUEUED";
+      // A queue label alone does not prove no jobs have started.
+      // Keep the observed queue count distinct from actionable candidates.
       items.push({
         id, sha: metadataIncomplete ? null : sha, suite, created: metadataIncomplete ? null : created,
-        state, queued: !metadataIncomplete && state === "WORKFLOW_RUN_STATUS_QUEUED" && !hasStarted,
+        state, queueObserved, startedEvidence: hasStarted,
+        queued: !metadataIncomplete && queueObserved && !hasStarted,
         metadataIncomplete, page: pageNumber
       });
     }
@@ -164,10 +171,12 @@ export async function pageOperation(input) {
     // Do not scan the entire page for generic "Queued"/"Running" strings:
     // hidden navigation, unrelated components, and stale timing labels can
     // otherwise prevent terminal-page detection indefinitely.
-    const allRunsTerminal = rows.every(run => terminalStatuses.has(run?.state?.status));
-    const domValidated = domIds.size === jsonIds.size &&
+    const allRunsTerminal = items.every(item => terminalStatuses.has(normalizeStatus(item.state)));
+    const domValidated = domIds.size > 0 && domIds.size === jsonIds.size &&
       [...domIds].every(id => jsonIds.has(id));
-    const terminalPage = rows.length === 25 && allRunsTerminal && domValidated;
+    // Some GitHub pages render run links only after hydration: when there are
+    // no DOM anchors, rely on the already-validated route JSON for fast stop.
+    const terminalPage = rows.length === 25 && allRunsTerminal;
     return { page: pageNumber, total: rows.length, items, statuses,
       terminalPage, lastPage: rows.length < 25, domValidated,
       allRunsTerminal, incompleteTerminalRuns: items.filter(item => item.metadataIncomplete).length };
