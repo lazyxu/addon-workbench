@@ -170,7 +170,7 @@ export async function pageOperation(input) {
         state, conclusion: [run?.state?.conclusion, run?.conclusion,
           run?.state?.result, run?.result].filter(value => typeof value === "string" && value)[0] || null,
         queueObserved, startedEvidence: hasStarted,
-        queued: !metadataIncomplete && queueObserved && !hasStarted,
+        queued: !metadataIncomplete && queueObserved,
         metadataIncomplete, page: pageNumber
       });
     }
@@ -220,7 +220,7 @@ export async function pageOperation(input) {
     if (!actual) throw new Error(`Run #${candidate.id} 已从原分页移动，请重新扫描`);
     if (actual.sha !== candidate.sha || actual.suite !== candidate.suite || actual.created !== candidate.created ||
         !actual.queued || actual.sha === latest) {
-      throw new Error(`Run #${candidate.id} 已不满足未运行旧构建条件，安全停止`);
+      throw new Error(`Run #${candidate.id} 已不满足旧分支 Queued 条件，安全停止`);
     }
     const response = await fetch(`${root}/suites/${actual.suite}/cancel`, {
       method: "PUT", credentials: "same-origin",
