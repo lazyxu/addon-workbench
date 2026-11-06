@@ -519,7 +519,7 @@ test('rejects lists that explicitly have more pages even if length matches count
 }));
 
 test('job detail request remains within logged-in github.com origin for fallback shapes', async () => withPage({
-  detailJSON:{payload:{jobs:{nodes:[{id:1,name:'build',status:'queued'}],pageInfo:{hasNextPage:false}}}
+  detailJSON:{payload:{jobs:{nodes:[{id:1,name:'build',status:'queued'}],pageInfo:{hasNextPage:false}}}}
 }, async ctx=>{
   const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
   assert.equal(result.accepted,true);
