@@ -8,7 +8,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
   const ui = Object.fromEntries([
     "repo", "unsupported", "tool", "workflow", "branch", "mode", "scanLimit", "limitLabel", "limitHint", "scan", "progress",
     "results", "statRuns", "statOld", "statQueued", "protectedInfo", "coverageInfo",
-    "candidateList", "selectAll", "cancel", "stop",
+    "candidateList", "stop",
     "liveScan", "livePages", "liveRuns", "liveOld", "liveQueued", "liveEligible",
     "showHistory", "historyPanel"
   ].map(id => [id, $(id)]));
@@ -43,12 +43,10 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
   function switchBusy(next) {
     busy = next;
     ui.scan.disabled = next;
-    ui.cancel.disabled = next || !snapshot?.selection.eligible.length || snapshot?.incomplete === true;
     ui.workflow.disabled = next;
     ui.branch.disabled = next;
     ui.mode.disabled = next;
     ui.scanLimit.disabled = next;
-    ui.selectAll.disabled = next;
     ui.stop.hidden = !next;
     if (next) ui.stop.textContent = snapshot ? "停止后续取消请求" : "停止扫描";
   }
@@ -58,7 +56,6 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     ui.liveScan.hidden = true;
     ui.results.hidden = true;
     ui.candidateList.replaceChildren();
-    ui.cancel.disabled = true;
   }
   function getSettings() {
     const workflow = normalizeWorkflow(ui.workflow.value);
@@ -96,17 +93,10 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     }
     return result;
   }
+  // Match the user-verified Console cleaner: after scanning, automatically
+  // cancel the first MAX_BATCH old top-level QUEUED workflow Runs.
   function selectedRuns() {
-    const ids = new Set([...ui.candidateList.querySelectorAll("input[type=checkbox]:checked")]
-      .map(node => Number(node.value)));
-    return snapshot?.selection.eligible.filter(item => ids.has(item.id)) || [];
-  }
-  function updateCancelButton() {
-    if (!snapshot) return;
-    const count = selectedRuns().length;
-    ui.cancel.disabled = busy || count === 0 || snapshot.incomplete === true;
-    ui.cancel.textContent = snapshot.incomplete ? "扫描不完整：禁止取消" : count === 0 ?
-      "没有选中的候选任务" : `取消选中的 ${count} 条旧 Queued CI`;
+    return snapshot?.selection.eligible.slice(0, MAX_BATCH) || [];
   }
   function renderResults() {
     const selection = snapshot.selection;
@@ -122,20 +112,16 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       (selection.skippedMetadata ?
         ` 另有 ${selection.skippedMetadata} 条终态 Run 缺少提交或时间字段，已排除旧 Run 统计及取消候选。` : "");
     ui.candidateList.replaceChildren();
-    for (const item of selection.eligible) {
-      const label = document.createElement("label"); label.className = "candidate";
-      const check = document.createElement("input"); check.type = "checkbox";
-      check.value = String(item.id); check.checked = true;
-      check.addEventListener("change", updateCancelButton);
+    for (const item of selection.eligible.slice(0, MAX_BATCH)) {
+      const label = document.createElement("div"); label.className = "candidate";
       const details = document.createElement("span"); details.className = "candidateText";
       const title = document.createElement("b"); title.textContent = `Run #${item.id} · ${item.sha.slice(0, 12)}`;
       const small = document.createElement("small");
       small.textContent = `${new Date(item.created).toLocaleString()} · 第 ${item.page} 页 · Queued`;
       details.append(title, small);
-      label.append(check, details);
+      label.append(details);
       ui.candidateList.append(label);
     }
-    updateCancelButton();
   }
   function showLiveCounts({ page, items, consecutiveTerminalPages }, head, settings) {
     // Counts describe only pages already read, never the whole GitHub history.
@@ -165,6 +151,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       ui[key].textContent = "0";
     }
     let confirmedHead = null;
+    let autoCancel = false;
     try {
       status("正在确认最新分支 SHA…");
       const { head } = await requestPage({ op: "head", ...settings });
@@ -195,7 +182,10 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       snapshot = { settings, head, selection, pages: outcome.pages, reason: outcome.reason,
         limited: outcome.limited, incomplete: false };
       renderResults();
-      status(`扫描完成：找到 ${selection.eligible.length} 条旧 Queued 任务。\n注意：部分 Job 可能已经开始，点击取消会中断这些 Job。\n${outcome.reason}\n尚未发送任何取消请求。`);
+      autoCancel = !stopRequested && selectedRuns().length > 0;
+      status(autoCancel ?
+        `扫描完成：旧 Queued 候选 ${selection.eligible.length} 条，将自动取消前 ${selectedRuns().length} 条。\n部分已开始的 Job 可能被中断；${outcome.reason}` :
+        `扫描完成：没有要取消的旧 Queued Run。\n${outcome.reason}`);
     } catch (error) {
       const partial = error.partialScan;
       if (confirmedHead && partial?.items?.length) {
@@ -220,7 +210,11 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     } finally {
       ui.liveScan.hidden = true;
       switchBusy(false);
-      updateCancelButton();
+    }
+    // The scan itself is read-only; after successful, complete validation
+    // immediately run the selected batch without a second button or prompt.
+    if (autoCancel && !stopRequested) {
+      await runCancellation().catch(error => status(errorText(error), true));
     }
   }
   async function saveHistory(item) {
@@ -246,7 +240,6 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       return;
     }
     switchBusy(true);
-    stopRequested = false;
     let accepted = 0, failed = 0, skipped = 0, stopReason = "";
     const acceptedRuns = [];
     let verified = null;
@@ -323,17 +316,6 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
   ui.branch.addEventListener("input", () => { branchEdited = true; });
   ui.scanLimit.addEventListener("input", () => { savedLimits[ui.mode.value] = ui.scanLimit.value; });
   ui.mode.addEventListener("change", updateModeUI);
-  ui.selectAll.addEventListener("click", () => {
-    const checkboxes = [...ui.candidateList.querySelectorAll('input[type="checkbox"]')];
-    const newValue = !checkboxes.every(node => node.checked);
-    for (const box of checkboxes) box.checked = newValue;
-    updateCancelButton();
-  });
-  // A single explicit click initiates the batch. Scan never sends PUTs.
-  ui.cancel.addEventListener("click", () => {
-    if (busy || !snapshot || snapshot.incomplete || !selectedRuns().length) return;
-    runCancellation().catch(error => status(errorText(error), true));
-  });
   ui.stop.addEventListener("click", () => {
     stopRequested = true;
     status(snapshot ? "正在停止后续取消请求；已发送的请求仍可能被 GitHub 接受…" :
