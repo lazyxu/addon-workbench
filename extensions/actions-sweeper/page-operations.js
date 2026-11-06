@@ -155,11 +155,16 @@ export async function pageOperation(input) {
       if (!Number.isSafeInteger(id) || id <= 0 || (!terminal && metadataIncomplete)) {
         throw new Error(`第 ${pageNumber} 页 Run 数据不完整：${String(run?.id)}`);
       }
-      const timing = [run?.timing?.text, run?.timing?.kind].filter(Boolean).join(" ");
-      const hasStarted = /IN[_\s-]*PROGRESS|RUNNING|STARTING/i.test(timing);
+      // GitHub uses WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS for the *timer*
+      // even when the run text says "Queued". That field is NOT proof of
+      // any job actually starting. Only the user-facing timing text can
+      // contradict the queued label; REST job verification is authoritative
+      // before a cancellation request is sent.
+      const timingText = String(run?.timing?.text || "").trim();
+      const hasStarted = /\bRUNNING\b|\bSTARTING\b|\bSTARTED\b|IN[\s_-]*PROGRESS/i.test(timingText);
       const queueObserved = normalizedStatus === "QUEUED";
-      // A queue label alone does not prove no jobs have started.
-      // Keep the observed queue count distinct from actionable candidates.
+      // Queue is a provisional page-level candidate only. A real cancel
+      // re-reads the run and checks every job's status, failing closed.
       items.push({
         id, sha: metadataIncomplete ? null : sha, suite, created: metadataIncomplete ? null : created,
         state, queueObserved, startedEvidence: hasStarted,
