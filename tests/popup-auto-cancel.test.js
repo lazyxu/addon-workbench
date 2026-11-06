@@ -87,11 +87,11 @@ async function harness({ noCandidates = false, failScan = false, stopDuringPage 
     "document","chrome","setTimeout","chooseRuns","gitHubContext",
     "normalizeWorkflow","normalizeBranch","scanLimitForMode","scanWorkflowPages",
     "verifyCancellationResults","DEFAULT_FAST_TERMINAL_PAGES","DEFAULT_FULL_MAX_PAGES",
-    popupSource
+    "pageOperation", popupSource
   );
   init(document,chrome,fn=>queueMicrotask(fn),chooseRuns,gitHubContext,
     normalizeWorkflow,normalizeBranch,scanLimitForMode,scanWorkflowPages,
-    verifyCancellationResults,2,20);
+    verifyCancellationResults,2,20,() => {});
   for (let i=0; i<5; i++) await Promise.resolve();
   return { elems, ops, accepted, history };
 }
