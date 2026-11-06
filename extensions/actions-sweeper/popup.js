@@ -142,14 +142,14 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     // Counts describe only pages already read, never the whole GitHub history.
     // Reusing chooseRuns also applies HEAD and newest-old protection.
     const selection = chooseRuns(items, head);
-    const queued = new Set(items.filter(item => item.queued === true).map(item => item.id)).size;
+    const queued = new Set(items.filter(item => item.queueObserved === true || item.queued === true).map(item => item.id)).size;
     ui.livePages.textContent = String(page);
     ui.liveRuns.textContent = String(selection.total);
     ui.liveOld.textContent = String(selection.older);
     ui.liveQueued.textContent = String(queued);
     ui.liveEligible.textContent = String(selection.eligible.length);
     status(`已完成第 ${page} 页 · ${settings.owner}/${settings.repo}
-已扫描 ${selection.total} Run，旧 Run ${selection.older}，排队 ${queued}，候选暂估 ${selection.eligible.length}` +
+已扫描 ${selection.total} Run，确认旧 Run ${selection.older}，排队状态 ${queued}，可取消候选暂估 ${selection.eligible.length}` +
       (settings.mode === "fast" ?
         ` · 连续终态 ${consecutiveTerminalPages}/${settings.terminalPages}` : ""));
   }
