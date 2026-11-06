@@ -54,11 +54,11 @@
       <p class="liveScanTitle">已完成 <strong id="livePages">0</strong> 页 · 每页读取后更新</p>
       <div class="stats liveStats">
         <div><strong id="liveRuns">0</strong><span>已扫描 Run</span></div>
-        <div><strong id="liveOld">0</strong><span>旧 Run</span></div>
-        <div><strong id="liveQueued">0</strong><span>排队 Run</span></div>
-        <div><strong id="liveEligible">0</strong><span>候选（暂估）</span></div>
+        <div><strong id="liveOld">0</strong><span>已确认旧 Run</span></div>
+        <div><strong id="liveQueued">0</strong><span>Queued 状态</span></div>
+        <div><strong id="liveEligible">0</strong><span>待核验候选</span></div>
       </div>
-      <p class="hint liveHint">扫描尚未结束，候选数量可能变化；此时不能取消。</p>
+      <p class="hint liveHint">只显示已验证页面；候选尚需检查 Job 是否开始，扫描中不能取消。</p>
     </section>
     <button type="button" id="stop" class="button subtle" hidden>停止扫描</button>
 
@@ -66,14 +66,14 @@
       <div class="stats">
         <div><strong id="statRuns">0</strong><span>已扫描 Run</span></div>
         <div><strong id="statOld">0</strong><span>旧 Run</span></div>
-        <div><strong id="statQueued">0</strong><span>可取消</span></div>
+        <div><strong id="statQueued">0</strong><span>待核验候选</span></div>
       </div>
       <p id="protectedInfo" class="hint"></p>
       <p id="coverageInfo" class="hint"></p>
       <div class="candidateTop"><strong>候选任务</strong><button type="button" id="selectAll" class="link-button">全选 / 取消</button></div>
       <div id="candidateList" class="candidateList" role="group" aria-label="候选 CI Run"></div>
       <label class="toggle"><input id="dryRun" type="checkbox" checked> Dry Run（只模拟，不发送取消请求）</label>
-      <button type="button" id="cancel" class="button warn" disabled>没有可取消任务</button>
+      <button type="button" id="cancel" class="button warn" disabled>没有候选任务</button>
       <div id="confirmation" class="confirmation" hidden>
         <p>即将向 GitHub 发送取消请求。请输入仓库名 <strong id="repoConfirmLabel"></strong> 确认：</p>
         <input id="repoConfirmInput" type="text" autocomplete="off" placeholder="输入仓库名">
