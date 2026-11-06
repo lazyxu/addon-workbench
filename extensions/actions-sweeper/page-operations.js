@@ -158,17 +158,19 @@ export async function pageOperation(input) {
       // GitHub uses WORKFLOW_RUN_TIMING_KIND_IN_PROGRESS for the *timer*
       // even when the run text says "Queued". That field is NOT proof of
       // any job actually starting. Only the user-facing timing text can
-      // contradict the queued label; same-origin job verification occurs
-      // immediately before any cancellation request.
+      // contradict the queued label; Run/HEAD are rechecked before PUT.
       const timingText = String(run?.timing?.text || "").trim();
       const hasStarted = /\bRUNNING\b|\bSTARTING\b|\bSTARTED\b|IN[\s_-]*PROGRESS/i.test(timingText);
       const queueObserved = normalizedStatus === "QUEUED";
-      // Queue is a provisional page-level candidate only. A real cancel
-      // re-reads the run and checks every job's status, failing closed.
+      // A workflow can be QUEUED while some jobs have already started.
+      // The original script considered the workflow-level queue status; so
+      // this is eligible subject to HEAD and same-page revalidation.
       items.push({
         id, sha: metadataIncomplete ? null : sha, suite, created: metadataIncomplete ? null : created,
-        state, queueObserved, startedEvidence: hasStarted,
-        queued: !metadataIncomplete && queueObserved && !hasStarted,
+        state, conclusion: [run?.state?.conclusion, run?.conclusion,
+          run?.state?.result, run?.result].filter(value => typeof value === "string" && value)[0] || null,
+        queueObserved, startedEvidence: hasStarted,
+        queued: !metadataIncomplete && queueObserved,
         metadataIncomplete, page: pageNumber
       });
     }
@@ -198,140 +200,11 @@ export async function pageOperation(input) {
     return { branch: candidates.find(x => x && !/[\s<>]/.test(x)) || null };
   }
   if (op === "page") return await parsePage(page);
-  // Only GitHub's logged-in, same-origin HTML pages are used. Never call
-  // a cross-origin REST API: browser login does not grant API authorization.
-  // Job verification is deliberately fail-closed if the GitHub UI changes.
-  const verifyNeverStarted = async actual => {
-    const html = await read(root + "/actions/runs/" + actual.id);
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const parsed = [];
-    for (const script of doc.querySelectorAll('script[type="application/json"]')) {
-      try { parsed.push(JSON.parse(script.textContent)); } catch { /* unrelated JSON */ }
-    }
-    if (!parsed.length) {
-      throw new Error("Run #" + actual.id + " 缺少 GitHub 页面 JSON，拒绝取消");
-    }
-    const normalized = value => typeof value === "string" ?
-      value.replace(/^(?:(?:WORKFLOW_(?:RUN|JOB)_|CHECK_RUN_|JOB_)?STATUS_)/i, "")
-        .trim().replace(/[\s-]+/g, "_").toUpperCase() : "UNKNOWN";
-    const jobState = job => [job?.status, job?.state?.status,
-      job?.checkRun?.status, job?.check_run?.status, job?.jobStatus,
-      job?.currentStatus].find(v => typeof v === "string" && v.trim()) || null;
-    const jobConclusion = job => job?.conclusion ?? job?.state?.conclusion ??
-      job?.checkRun?.conclusion ?? job?.check_run?.conclusion;
-    const jobKey = job => job?.id ?? job?.databaseId ?? job?.checkRun?.id ??
-      job?.name ?? job?.displayName;
-    const hasStarted = job => {
-      const state = normalized(jobState(job));
-      const conclusion = jobConclusion(job);
-      return state !== "QUEUED" || (conclusion != null && conclusion !== "") ||
-        (Array.isArray(job?.steps) && job.steps.some(step =>
-          ["IN_PROGRESS", "COMPLETED", "RUNNING"].includes(normalized(
-            step?.status ?? step?.state?.status))));
-    };
-
-    const observations = [];
-    const findCount = (container, parent) => {
-      for (const value of [
-        container?.totalCount, container?.total_count, container?.jobsCount,
-        container?.jobCount, container?.totalJobs, container?.count,
-        parent?.jobsCount, parent?.jobCount, parent?.totalJobs,
-        parent?.totalJobCount, parent?.total_job_count
-      ]) {
-        if (Number.isSafeInteger(value) && value >= 0) return value;
-      }
-      return null;
-    };
-    const listFrom = value => Array.isArray(value) ? value :
-      Array.isArray(value?.nodes) ? value.nodes :
-      Array.isArray(value?.items) ? value.items :
-      Array.isArray(value?.edges) ? value.edges.map(edge => edge?.node) : null;
-    const visit = (node, path = "$", depth = 0) => {
-      if (!node || typeof node !== "object" || depth > 20) return;
-      if (Array.isArray(node)) {
-        for (const item of node.slice(0, 150)) visit(item, path + "[]", depth + 1);
-        return;
-      }
-      for (const [key, value] of Object.entries(node)) {
-        const childPath = path + "." + key;
-        if (/^(?:jobs|workflowJobs|checkRuns|workflowRunJobs|jobList|jobItems)$/i.test(key)) {
-          const jobs = listFrom(value);
-          if (jobs) {
-            const count = findCount(value, node);
-            const hasMore = value?.pageInfo?.hasNextPage === true ||
-              value?.pagination?.hasNextPage === true ||
-              value?.hasMore === true || value?.hasNextPage === true;
-            const endOfPages = value?.pageInfo?.hasNextPage === false ||
-              value?.pagination?.hasNextPage === false ||
-              value?.hasMore === false || value?.hasNextPage === false;
-            observations.push({
-              path: childPath, jobs, count, hasMore, endOfPages
-            });
-          }
-        }
-        visit(value, childPath, depth + 1);
-      }
-    };
-    parsed.forEach(tree => visit(tree));
-
-    // Any started Job shown in the run detail page is enough to refuse,
-    // even when the list is partial. Never trust a smaller queued subset.
-    const allObserved = observations.flatMap(o => o.jobs);
-    const started = allObserved.find(job => job && typeof job === "object" &&
-      jobState(job) && hasStarted(job));
-    if (started) {
-      throw new Error("Run #" + actual.id +
-        " 的 Job 已开始/完成或状态不确定（" +
-        String(jobKey(started) || "unknown") + "），拒绝取消");
-    }
-    const valid = observations.filter(o =>
-      o.jobs.length > 0 && o.jobs.length <= 100 &&
-      o.jobs.every(job => job && typeof job === "object" &&
-        jobKey(job) != null && jobState(job) && !hasStarted(job)));
-    const domIds = new Set();
-    const jobPath = new RegExp("^" + rootPattern +
-      "/actions/runs/" + actual.id + "/job/(\\d+)(?:[/?#]|$)");
-    for (const link of doc.querySelectorAll('a[href*="/job/"]')) {
-      const href = link.getAttribute("href") || "";
-      const path = href.startsWith("https://github.com") ?
-        href.slice(location.origin.length) : href;
-      const id = path.match(jobPath)?.[1];
-      if (id) domIds.add(id);
-    }
-    // A list is complete only when an explicit count/end marker, or an exact
-    // DOM-to-JSON job-ID match, demonstrates coverage. Missing totalCount
-    // alone must not reject a complete route list.
-    const complete = valid.filter(o => !o.hasMore && (
-      (o.count !== null && o.count === o.jobs.length) ||
-      (o.endOfPages && (o.count === null || o.count === o.jobs.length)) ||
-      (domIds.size > 0 && domIds.size === o.jobs.length &&
-        o.jobs.every(job => domIds.has(String(jobKey(job)))))
-    ));
-    if (!complete.length) {
-      const hints = observations.slice(0, 3).map(o =>
-        o.path + " " + o.jobs.length + "/" + (o.count ?? "?") +
-        (o.hasMore ? " more" : "")
-      ).join("; ");
-      throw new Error("Run #" + actual.id +
-        " 的 Job 列表缺少完整性证据，拒绝取消。" +
-        (hints ? " 已发现: " + hints : " 页面未返回 Job 列表"));
-    }
-    const signatures = complete.map(o => JSON.stringify(o.jobs.map(job => [
-      String(jobKey(job)), normalized(jobState(job)),
-      String(jobConclusion(job) || "")
-    ]).sort((a, b) => a[0].localeCompare(b[0]))));
-    if (new Set(signatures).size !== 1) {
-      throw new Error("Run #" + actual.id + " 存在互相冲突的完整 Job 列表，拒绝取消");
-    }
-    // A partial list must not introduce unknown/unverified extra jobs.
-    const allowedIds = new Set(complete[0].jobs.map(job => String(jobKey(job))));
-    if (allObserved.some(job => !job || typeof job !== "object" ||
-        jobKey(job) == null || !allowedIds.has(String(jobKey(job))) ||
-        !jobState(job))) {
-      throw new Error("Run #" + actual.id + " 的 Job 列表有未核验条目，拒绝取消");
-    }
-
-  };
+  // Restore the original console-script policy: the workflow-level QUEUED
+  // state is the criterion for selecting a cancellation, not whether *all*
+  // jobs have remained untouched. This can interrupt already-running jobs.
+  // Still revalidate exact HEAD, workflow/branch, Run ID, SHA, suite, page
+  // and queued status immediately before any same-origin cancel PUT.
   if (op === "cancel-one") {
     if (!candidate || !Number.isSafeInteger(candidate.id) || candidate.id <= 0 ||
         !/^\d+$/.test(String(candidate.suite || "")) ||
@@ -347,9 +220,8 @@ export async function pageOperation(input) {
     if (!actual) throw new Error(`Run #${candidate.id} 已从原分页移动，请重新扫描`);
     if (actual.sha !== candidate.sha || actual.suite !== candidate.suite || actual.created !== candidate.created ||
         !actual.queued || actual.sha === latest) {
-      throw new Error(`Run #${candidate.id} 已不满足未运行旧构建条件，安全停止`);
+      throw new Error(`Run #${candidate.id} 已不满足旧分支 Queued 条件，安全停止`);
     }
-    await verifyNeverStarted(actual);
     const response = await fetch(`${root}/suites/${actual.suite}/cancel`, {
       method: "PUT", credentials: "same-origin",
       headers: {

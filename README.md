@@ -6,7 +6,7 @@ A monorepo for small, independent productivity add-ons. Each add-on has its own 
 
 | Extension | Purpose | Status |
 | --- | --- | --- |
-| [Actions Sweeper](extensions/actions-sweeper/README.md) | Review and safely cancel stale **queued** GitHub Actions workflow runs on the current repository | Chrome Manifest V3 / beta (v0.1.6) |
+| [Actions Sweeper](extensions/actions-sweeper/README.md) | Review and safely cancel stale **queued** GitHub Actions workflow runs on the current repository | Chrome Manifest V3 / beta (v0.1.8) |
 
 ## Install (Chrome / Edge)
 

@@ -1,58 +1,77 @@
-name: Cleanup merged development branches
+name: Cleanup superseded Actions Sweeper branches
 
-# One-time maintenance action: it runs only when this allowlist workflow is added
-# or deliberately edited on master. It never deletes master or arbitrary branches.
+# Only executes when merged to master (or manually dispatched on master).
+# All names are explicit; open PR heads and master are never deleted.
 on:
   push:
     branches: [master]
     paths:
       - '.github/workflows/cleanup-merged-branches.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   cleanup:
-    name: Delete explicitly allowlisted merged branches
+    name: Delete allowlisted obsolete branches after PR close
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
-      - name: Delete obsolete merged branches
+      - name: Remove superseded Actions Sweeper branches
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          # All six old branches + the replacement branch (only after its PR
+          # has been merged). No arbitrary branch search or wildcard deletion.
           branches=(
-            "feat/actions-sweeper-chrome-mv3"
-            "feat/actions-sweeper-configurable-scan-defaults"
-            "fix/actions-sweeper-filtered-pagination-cap"
-            "fix/single-extract-chrome-artifact"
-            "chore/cleanup-obsolete-branches"
+            "feat/actions-sweeper-live-scan-counts"
+            "fix/actions-sweeper-queued-timing-kind-v014"
+            "fix/actions-sweeper-github-session-only-v015"
+            "fix/actions-sweeper-job-details-single-click-v016"
+            "fix/actions-sweeper-restore-original-queued-cancel-v017"
+            "fix/actions-sweeper-terminal-run-metadata"
+            "fix/actions-sweeper-verified-console-parity"
           )
 
+          owner="${GH_REPOSITORY%%/*}"
           for branch in "${branches[@]}"; do
-            # Branch names are a fixed allowlist above; master is never included.
-            url="https://api.github.com/repos/${GH_REPOSITORY}/git/refs/heads/${branch}"
-            status="$(curl --silent --show-error --output response.json --write-out '%{http_code}' \
+            if [[ "$branch" == "master" || "$branch" == "main" ]]; then
+              echo "Protected default branch: $branch" >&2
+              exit 1
+            fi
+
+            head_query="$(jq -rn --arg h "${owner}:${branch}" '$h | @uri')"
+            open_prs="$(curl --fail --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GH_REPOSITORY}/pulls?state=open&head=${head_query}")"
+            if [[ "$(jq 'length' <<< "$open_prs")" != "0" ]]; then
+              echo "SKIP branch with an open PR: $branch"
+              continue
+            fi
+
+            response="$(mktemp)"
+            status="$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
               --request DELETE \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
-              "${url}")"
+              "https://api.github.com/repos/${GH_REPOSITORY}/git/refs/heads/${branch}")"
 
-            case "${status}" in
-              204)
-                echo "Deleted merged branch: ${branch}"
-                ;;
-              404)
-                echo "Already absent: ${branch}"
-                ;;
-              *)
-                echo "Failed to delete ${branch} (HTTP ${status})" >&2
-                cat response.json >&2
-                exit 1
-                ;;
+            case "$status" in
+              204) echo "DELETED: $branch" ;;
+              404) echo "ALREADY ABSENT: $branch" ;;
+              *) echo "FAILED: $branch (HTTP $status)" >&2
+                 cat "$response" >&2
+                 rm -f "$response"
+                 exit 1 ;;
             esac
+            rm -f "$response"
           done
