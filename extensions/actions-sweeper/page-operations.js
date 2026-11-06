@@ -60,77 +60,14 @@ export async function pageOperation(input) {
     }
     return null;
   };
-  // A completed run can legitimately lack the optional description link in
-  // GitHub's embedded UI JSON. Only exact, repository-scoped commit URLs and
-  // explicit 40-character commit fields may establish an actionable SHA.
+  // GitHub's UI JSON can omit the optional commit link on terminal runs.
+  // Only repository-scoped commit URLs and explicit full SHAs are trusted.
   const shaFromLink = (value, rootPattern) => {
     if (typeof value !== "string" || !value) return null;
     let url;
     try { url = new URL(value, location.origin); } catch { return null; }
     if (url.origin !== location.origin) return null;
-    return url.pathname.match(new RegExp(`^${rootPattern}/commit/([0-9a-f]{40})/?/** Same-origin page operation, injected from an MV3 extension into the active GitHub tab. */
-export async function pageOperation(input) {
-  // Chrome may discard an injected Promise rejection; always return a serializable error.
-  try {
-  const { op, owner, repo, branch, workflow, page = 1, expectedHead, candidate } = input || {};
-  if (location.origin !== "https://github.com") throw new Error("仅支持 github.com");
-  if (![owner, repo].every(x => typeof x === "string" && /^[a-zA-Z0-9_.-]+$/.test(x))) {
-    throw new Error("仓库标识无效");
-  }
-  const segments = location.pathname.split("/").filter(Boolean);
-  if (segments[0] !== owner || segments[1] !== repo) {
-    throw new Error("当前标签页已经切换仓库，停止执行");
-  }
-  const root = `/${owner}/${repo}`;
-  const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const rootPattern = escapeRegExp(root);
-  const read = async path => {
-    if (!path.startsWith(root + "/") && path !== root) throw new Error("拒绝跨仓库请求");
-    let response;
-    try {
-      response = await fetch(path, { credentials: "same-origin", cache: "no-store" });
-    } catch (cause) {
-      const error = new Error(`GitHub 网络读取失败 (${path}): ${cause?.message || String(cause)}`);
-      error.retryable = true;
-      throw error;
-    }
-    if (!response.ok) {
-      const error = new Error(`GitHub 读取失败：HTTP ${response.status} (${path})`);
-      error.httpStatus = response.status;
-      const retryAfter = Number(response.headers?.get?.("retry-after"));
-      error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : null;
-      error.retryable = [429, 500, 502, 503, 504].includes(response.status) ||
-        (response.status === 403 &&
-         (error.retryAfterMs !== null || response.headers?.get?.("x-ratelimit-remaining") === "0"));
-      throw error;
-    }
-    return response.text();
-  };
-  const checkBranch = () => {
-    if (!branch || typeof branch !== "string" || branch.length > 150 ||
-        /[\s~^:?*\[\\]/.test(branch) || branch.includes("..") || branch.includes("@{")) {
-      throw new Error("分支名不合法");
-    }
-  };
-  const getHead = async () => {
-    checkBranch();
-    const feed = await read(`${root}/commits/${encodeURIComponent(branch)}.atom`);
-    const first = feed.match(/<entry\b[\s\S]*?<\/entry>/i)?.[0] || "";
-    const sha = first.match(/Grit::Commit\/([0-9a-f]{40})/i)?.[1] ||
-      first.match(/\/commit\/([0-9a-f]{40})/i)?.[1];
-    if (!sha) throw new Error("无法从 Atom Feed 确认当前分支 SHA，拒绝操作");
-    return sha.toLowerCase();
-  };
-  const findRuns = (value, depth = 0) => {
-    if (!value || typeof value !== "object" || depth > 12) return null;
-    if (Array.isArray(value.workflowRunsRoute?.workflowRuns)) return value.workflowRunsRoute.workflowRuns;
-    for (const child of Object.values(value)) {
-      const rows = findRuns(child, depth + 1);
-      if (rows) return rows;
-    }
-    return null;
-  };
-, "i"))?.[1]?.toLowerCase() || null;
+    return url.pathname.match(new RegExp(`^${rootPattern}/commit/([0-9a-f]{40})/?$`, "i"))?.[1]?.toLowerCase() || null;
   };
   const exactSha = value => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value) ?
     value.toLowerCase() : null;
@@ -216,7 +153,7 @@ export async function pageOperation(input) {
         throw new Error(`第 ${pageNumber} 页 Run 数据不完整：${String(run?.id)}`);
       }
       const timing = [run?.timing?.text, run?.timing?.kind].filter(Boolean).join(" ");
-      const hasStarted = /IN[_\\s-]*PROGRESS|RUNNING|STARTING|IN_PROGRESS/i.test(timing);
+      const hasStarted = /IN[_\s-]*PROGRESS|RUNNING|STARTING|IN_PROGRESS/i.test(timing);
       items.push({
         id, sha: metadataIncomplete ? null : sha, suite, created: metadataIncomplete ? null : created,
         state, queued: !metadataIncomplete && state === "WORKFLOW_RUN_STATUS_QUEUED" && !hasStarted,
