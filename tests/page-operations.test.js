@@ -18,7 +18,7 @@ const row = (status = 'WORKFLOW_RUN_STATUS_QUEUED', timingText='') => ({
 async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200,
   unrelatedQueuedText = false, omitDomAnchors = false, detailsStatus = 200,
   jobsResponse = { totalCount:1, nodes:[{id:321, name:'test job', status:'queued', conclusion:null}] },
-  detailJSON = null }, fn) {
+  detailJSON = null, detailJobLinks = [] }, fn) {
   const before = {fetch:globalThis.fetch, location:globalThis.location, DOMParser:globalThis.DOMParser};
   let sentCancel = 0;
   const reads = [];
@@ -33,6 +33,8 @@ async function withPage({rows = [row()], sha = currentSha, status = 200, readSta
           parsedRows ? {workflowRunsRoute:{workflowRuns:parsedRows}} : parsed
         )}];
         if (selector === 'a[href*="/actions/runs/"]') return omitDomAnchors || !parsedRows ? [] : parsedRows.map(r => ({getAttribute:() => '/example/repository/actions/runs/' + r.id}));
+        if (selector === 'a[href*="/job/"]') return detailJobLinks.map(id =>
+          ({getAttribute:() => '/example/repository/actions/runs/123/job/' + id}));
         if (unrelatedQueuedText && selector.startsWith("span,")) return [{textContent:"Queued",childElementCount:0,getAttribute:() => null}];
         return [];
       }};
@@ -443,4 +445,85 @@ test('queued workflow timer kind cannot bypass job-level refusal if a job comple
   assert.equal(result.__actionsSweeperError,true);
   assert.match(result.message,/Job 已开始/);
   assert.equal(ctx.getSentCancel(),0);
+}));
+
+
+test('accepts complete same-origin job array when end-of-pages is explicit without totalCount', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{jobs:{
+    edges:[{node:{id:1,name:'setup',status:'queued'}},{node:{id:2,name:'build',status:'queued'}}],
+    pageInfo:{hasNextPage:false}
+  }}}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+  assert.equal(ctx.detailReads.length,1);
+}));
+
+test('accepts complete same-origin job array when count is on parent container', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{
+    jobsCount:2,
+    jobs:[{id:1,name:'setup',status:'queued'},{id:2,name:'compile',status:'queued'}]
+  }}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+}));
+
+test('accepts job list when rendered job anchors confirm full coverage without count', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{
+    jobs:[{id:1001,name:'setup',status:'queued'},{id:1002,name:'build',status:'queued'}]
+  }}},
+  detailJobLinks:[1001,1002]
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+}));
+
+test('rejects job list with missing totalCount and only partial rendered links', async () => withPage({
+  detailJSON:{payload:{workflowRunJobsRoute:{
+    jobs:[{id:1001,name:'setup',status:'queued'},{id:1002,name:'build',status:'queued'}]
+  }}},
+  detailJobLinks:[1001]
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.match(result.message,/缺少完整性证据/);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('rejects apparent queued subset if a second incomplete list exposes a started job', async () => withPage({
+  detailJSON:{payload:{
+    complete:{jobs:{totalCount:1,nodes:[{id:1,name:'build',status:'queued'}]}},
+    additional:{jobs:[{id:2,name:'pr-scope',status:'completed'}]}
+  }}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.match(result.message,/Job 已开始/);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('rejects lists that explicitly have more pages even if length matches count', async () => withPage({
+  detailJSON:{payload:{jobs:{
+    totalCount:1,
+    nodes:[{id:1,name:'build',status:'queued'}],
+    pageInfo:{hasNextPage:true}
+  }}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.__actionsSweeperError,true);
+  assert.equal(ctx.getSentCancel(),0);
+}));
+
+test('job detail request remains within logged-in github.com origin for fallback shapes', async () => withPage({
+  detailJSON:{payload:{jobs:{nodes:[{id:1,name:'build',status:'queued'}],pageInfo:{hasNextPage:false}}}
+}, async ctx=>{
+  const result=await pageOperation({op:'cancel-one',...input,expectedHead:currentSha,candidate});
+  assert.equal(result.accepted,true);
+  assert.equal(ctx.getSentCancel(),1);
+  assert.ok(ctx.reads.every(r=>String(r.path).startsWith('/example/repository/') &&
+    r.options.credentials==='same-origin'));
 }));
