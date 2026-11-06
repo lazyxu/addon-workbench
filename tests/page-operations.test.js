@@ -14,7 +14,7 @@ const row = (status = 'WORKFLOW_RUN_STATUS_QUEUED', timingText='') => ({
   createdAt: { timestamp:stamp }, state:{status}, timing:{text:timingText,kind:''}
 });
 
-async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200, unrelatedQueuedText = false}, fn) {
+async function withPage({rows = [row()], sha = currentSha, status = 200, readStatus = 200, unrelatedQueuedText = false, omitDomAnchors = false}, fn) {
   const before = {fetch:globalThis.fetch, location:globalThis.location, DOMParser:globalThis.DOMParser};
   let sentCancel = 0;
   const reads = [];
@@ -24,7 +24,7 @@ async function withPage({rows = [row()], sha = currentSha, status = 200, readSta
       const {rows} = JSON.parse(payload);
       return {querySelectorAll(selector) {
         if (selector === 'script[type="application/json"]') return [{textContent:JSON.stringify({workflowRunsRoute:{workflowRuns:rows}})}];
-        if (selector === 'a[href*="/actions/runs/"]') return rows.map(r => ({getAttribute:() => '/example/repository/actions/runs/' + r.id}));
+        if (selector === 'a[href*="/actions/runs/"]') return omitDomAnchors ? [] : rows.map(r => ({getAttribute:() => '/example/repository/actions/runs/' + r.id}));
         if (unrelatedQueuedText && selector.startsWith("span,")) return [{textContent:"Queued",childElementCount:0,getAttribute:() => null}];
         return [];
       }};
@@ -229,4 +229,59 @@ test('fully terminal page remains eligible for fast stop with optional metadata 
   assert.equal(page.terminalPage, true);
   assert.equal(page.incompleteTerminalRuns, 25);
   assert.ok(page.items.every(item => !item.queued));
+}));
+
+
+test('queue label and cancellable confidence are distinct when timing reports running', async () => withPage({
+  rows: [{ ...row('WORKFLOW_RUN_STATUS_QUEUED', 'Running'), id:42196976014 }]
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.items[0].queueObserved, true);
+  assert.equal(page.items[0].startedEvidence, true);
+  assert.equal(page.items[0].queued, false);
+  assert.equal(page.terminalPage, false);
+}));
+
+test('normalize unprefixed queued and in-progress states', async () => withPage({
+  rows: [{...row(), state:null, status:'queued'}]
+}, async () => {
+  const page = await pageOperation({op:'page',...input,page:1});
+  assert.equal(page.items[0].queueObserved, true);
+  assert.equal(page.items[0].queued, true);
+}));
+
+test('completed conclusions are terminal even when GitHub uses SUCCESS/FAILURE names', async () => withPage({
+  rows: Array.from({length:25}, (_, i) => ({
+    ...row(['WORKFLOW_RUN_STATUS_SUCCESS','WORKFLOW_RUN_STATUS_FAILURE','WORKFLOW_RUN_STATUS_SKIPPED'][i%3]),
+    id:3000+i,
+    description:null,
+    createdAt:null
+  }))
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.terminalPage, true);
+  assert.equal(page.allRunsTerminal, true);
+  assert.equal(page.incompleteTerminalRuns, 25);
+  assert.ok(page.items.every(item => item.queued === false));
+}));
+
+test('fast terminal recognition works when GitHub page has no pre-rendered run anchors', async () => withPage({
+  rows: Array.from({length:25}, (_, i) => ({...row('WORKFLOW_RUN_STATUS_COMPLETED'), id:4000+i})),
+  omitDomAnchors:true
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.domValidated, false);
+  assert.equal(page.terminalPage, true);
+  assert.equal(page.items.length, 25);
+}));
+
+test('unknown state does not stop fast scan prematurely', async () => withPage({
+  rows: Array.from({length:25}, (_, i) => ({
+    ...row(i===0 ? 'WORKFLOW_RUN_STATUS_SOMETHING_NEW' : 'WORKFLOW_RUN_STATUS_COMPLETED'),
+    id:5000+i
+  }))
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.terminalPage, false);
+  assert.equal(page.allRunsTerminal, false);
 }));
