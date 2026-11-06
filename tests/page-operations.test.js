@@ -144,3 +144,89 @@ test('terminal page is not accepted when any listed run is queued', async () => 
   assert.equal(page.allRunsTerminal, false);
   assert.equal(page.terminalPage, false);
 }));
+
+
+test('regression: completed CI run 42164508995 missing optional metadata never aborts page 1', async () => withPage({
+  rows: [{ ...row('WORKFLOW_RUN_STATUS_COMPLETED'), id: 42164508995, description: null, createdAt: null }]
+}, async ctx => {
+  const page = await pageOperation({ op:'page', ...input, page:1 });
+  assert.equal(page.__actionsSweeperError, undefined);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0].id, 42164508995);
+  assert.equal(page.items[0].sha, null);
+  assert.equal(page.items[0].created, null);
+  assert.equal(page.items[0].queued, false);
+  assert.equal(page.incompleteTerminalRuns, 1);
+  assert.equal(page.lastPage, true);
+  assert.equal(ctx.getSentCancel(), 0);
+}));
+
+test('completed row missing SHA does not prevent scanning known queued rows', async () => withPage({
+  rows: [
+    { ...row('WORKFLOW_RUN_STATUS_COMPLETED'), id: 42164508995, description: null },
+    { ...row(), id: 42164508888 }
+  ]
+}, async () => {
+  const page = await pageOperation({ op:'page', ...input, page:1 });
+  assert.equal(page.items[0].queued, false);
+  assert.equal(page.items[1].queued, true);
+  assert.equal(page.items[1].sha, olderSha);
+  assert.equal(page.incompleteTerminalRuns, 1);
+}));
+
+test('accepts alternate explicit SHA and created time on queued rows', async () => withPage({
+  rows: [{ ...row(), description: null, headSha: olderSha, createdAt: { date: stamp } }]
+}, async () => {
+  const page = await pageOperation({ op:'page', ...input, page:1 });
+  assert.equal(page.items[0].sha, olderSha);
+  assert.equal(page.items[0].created, stamp);
+  assert.equal(page.items[0].queued, true);
+  assert.equal(page.incompleteTerminalRuns, 0);
+}));
+
+test('accepts same-origin absolute commit URL with query string', async () => withPage({
+  rows: [{ ...row(), description: {linkUrl:'https://github.com/example/repository/commit/' + olderSha + '?check=1'} }]
+}, async () => {
+  const page = await pageOperation({ op:'page', ...input, page:1 });
+  assert.equal(page.items[0].sha, olderSha);
+}));
+
+test('refuses queued runs with absent or conflicting SHA even with a cancel URL', async () => {
+  for (const bad of [
+    { ...row(), description: null },
+    { ...row(), description: {linkUrl:'https://example.com/example/repository/commit/' + olderSha} },
+    { ...row(), headSha: currentSha }
+  ]) {
+    await withPage({rows:[bad]}, async ctx => {
+      const page = await pageOperation({op:'page', ...input, page:1});
+      assert.equal(page.__actionsSweeperError, true);
+      assert.match(page.message, /Run 数据不完整/);
+      assert.equal(ctx.getSentCancel(), 0);
+      const canceled = await pageOperation({op:'cancel-one', ...input, expectedHead:currentSha, candidate});
+      assert.equal(canceled.__actionsSweeperError, true);
+      assert.equal(ctx.getSentCancel(), 0);
+    });
+  }
+});
+
+test('refuses nonterminal run with missing timestamp and does not cancel', async () => withPage({
+  rows: [{ ...row(), createdAt: null }]
+}, async ctx => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.__actionsSweeperError, true);
+  assert.match(page.message, /Run 数据不完整/);
+  assert.equal(ctx.getSentCancel(), 0);
+}));
+
+test('fully terminal page remains eligible for fast stop with optional metadata missing', async () => withPage({
+  rows: Array.from({length:25}, (_, index) => ({
+    ...row('WORKFLOW_RUN_STATUS_COMPLETED'), id: 42164508995 - index,
+    description: null, createdAt: null
+  }))
+}, async () => {
+  const page = await pageOperation({op:'page', ...input, page:1});
+  assert.equal(page.allRunsTerminal, true);
+  assert.equal(page.terminalPage, true);
+  assert.equal(page.incompleteTerminalRuns, 25);
+  assert.ok(page.items.every(item => !item.queued));
+}));
