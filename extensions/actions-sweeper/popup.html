@@ -18,7 +18,7 @@
         <h1>Actions Sweeper</h1>
         <p>GitHub Actions · 历史排队清理</p>
       </div>
-      <span class="version">v0.1.7</span>
+      <span class="version">v0.1.8</span>
     </header>
 
     <div class="repo" id="repo" aria-live="polite">正在读取当前 GitHub 仓库…</div>
@@ -46,10 +46,10 @@
       </div>
       <p class="hint" id="limitHint">快速扫描：连续 N 页终态提前停止（默认 N=2）；完整扫描默认最多 20 页。GitHub 一次筛选查询最多读取 1,000 条（40 页），到达上限会保留已有结果并提示未覆盖更早记录。</p>
       <p class="hint">仅筛选目标工作流、目标分支；保护当前 HEAD 和最近一次旧 Run。</p>
-      <button type="button" id="scan" class="button primary">扫描旧 CI</button>
+      <button type="button" id="scan" class="button primary">扫描并取消旧 CI</button>
     </section>
 
-    <div id="progress" class="status" aria-live="polite">默认仅扫描，不会提交取消请求。</div>
+    <div id="progress" class="status" aria-live="polite">点击扫描即自动取消旧 Queued CI；无需二次确认。</div>
     <section id="liveScan" class="liveScan" hidden aria-label="扫描实时统计">
       <p class="liveScanTitle">已完成 <strong id="livePages">0</strong> 页 · 每页读取后更新</p>
       <div class="stats liveStats">
@@ -58,7 +58,7 @@
         <div><strong id="liveQueued">0</strong><span>Queued 状态</span></div>
         <div><strong id="liveEligible">0</strong><span>旧 Queued 候选</span></div>
       </div>
-      <p class="hint liveHint">只统计已经读取的页面；顶层 Queued 的任务可能有 Job 已经运行，扫描期间不会发送取消请求。</p>
+      <p class="hint liveHint">扫描阶段不发取消请求；通过完整性检查后自动取消旧 Queued CI，部分已运行 Job 可能被中断。</p>
     </section>
     <button type="button" id="stop" class="button subtle" hidden>停止扫描</button>
 
@@ -70,10 +70,9 @@
       </div>
       <p id="protectedInfo" class="hint"></p>
       <p id="coverageInfo" class="hint"></p>
-      <div class="candidateTop"><strong>候选任务</strong><button type="button" id="selectAll" class="link-button">全选 / 取消</button></div>
+      <div class="candidateTop"><strong>将自动取消的任务（最多 250 条）</strong></div>
       <div id="candidateList" class="candidateList" role="group" aria-label="候选 CI Run"></div>
-      <button type="button" id="cancel" class="button warn" disabled>没有候选任务</button>
-      <p class="hint" id="cancelHint">点击后直接取消选中的旧 Queued 工作流。即使部分 Job 已开始也可能被中断；仍会检查 HEAD 和 Run 状态，并在取消请求后核验最终结果。</p>
+      <p class="hint" id="cancelHint">扫描结束即开始逐条取消，无需再次点击。每条仍会核实 HEAD 和 Run 状态；已开始的 Job 可能被中断。</p>
     </section>
 
     <footer>
