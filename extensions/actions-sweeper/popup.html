@@ -56,9 +56,9 @@
         <div><strong id="liveRuns">0</strong><span>已扫描 Run</span></div>
         <div><strong id="liveOld">0</strong><span>已确认旧 Run</span></div>
         <div><strong id="liveQueued">0</strong><span>Queued 状态</span></div>
-        <div><strong id="liveEligible">0</strong><span>待核验候选</span></div>
+        <div><strong id="liveEligible">0</strong><span>旧 Queued 候选</span></div>
       </div>
-      <p class="hint liveHint">只显示已验证页面；候选尚需检查 Job 是否开始，扫描中不能取消。</p>
+      <p class="hint liveHint">只统计已经读取的页面；顶层 Queued 的任务可能有 Job 已经运行，扫描期间不会发送取消请求。</p>
     </section>
     <button type="button" id="stop" class="button subtle" hidden>停止扫描</button>
 
@@ -66,14 +66,14 @@
       <div class="stats">
         <div><strong id="statRuns">0</strong><span>已扫描 Run</span></div>
         <div><strong id="statOld">0</strong><span>旧 Run</span></div>
-        <div><strong id="statQueued">0</strong><span>待核验候选</span></div>
+        <div><strong id="statQueued">0</strong><span>旧 Queued 候选</span></div>
       </div>
       <p id="protectedInfo" class="hint"></p>
       <p id="coverageInfo" class="hint"></p>
       <div class="candidateTop"><strong>候选任务</strong><button type="button" id="selectAll" class="link-button">全选 / 取消</button></div>
       <div id="candidateList" class="candidateList" role="group" aria-label="候选 CI Run"></div>
       <button type="button" id="cancel" class="button warn" disabled>没有候选任务</button>
-      <p class="hint" id="cancelHint">点击后立即逐条核验并提交符合条件的取消请求；不会出现二次确认。无法核验的 Run 会安全停止。</p>
+      <p class="hint" id="cancelHint">点击后直接取消选中的旧 Queued 工作流。即使部分 Job 已开始也可能被中断；仍会检查 HEAD 和 Run 状态，并在取消请求后核验最终结果。</p>
     </section>
 
     <footer>
