@@ -106,8 +106,8 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
     if (!snapshot) return;
     const count = selectedRuns().length;
     ui.cancel.disabled = busy || count === 0 || snapshot.incomplete === true;
-    ui.cancel.textContent = snapshot.incomplete ? "扫描不完整：禁止取消" : count === 0 ? "没有选中的任务" :
-      (ui.dryRun.checked ? `预演 ${count} 条取消操作` : `取消选中的 ${count} 条旧 CI`);
+    ui.cancel.textContent = snapshot.incomplete ? "扫描不完整：禁止取消" : count === 0 ? "没有选中的候选任务" :
+      (ui.dryRun.checked ? `预演 ${count} 条取消操作` : `核验并取消 ${count} 条旧 CI`);
   }
   function renderResults() {
     const selection = snapshot.selection;
@@ -196,7 +196,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       snapshot = { settings, head, selection, pages: outcome.pages, reason: outcome.reason,
         limited: outcome.limited, incomplete: false };
       renderResults();
-      status(`扫描完成：找到 ${selection.eligible.length} 条可取消的旧排队任务。\n${outcome.reason}\n尚未向 GitHub 发送任何取消请求。`);
+      status(`扫描完成：找到 ${selection.eligible.length} 条待核验旧排队任务。\n取消前还会检查 GitHub Run 和 Job 状态。\n${outcome.reason}\n尚未发送任何取消请求。`);
     } catch (error) {
       const partial = error.partialScan;
       if (confirmedHead && partial?.items?.length) {
@@ -244,7 +244,7 @@ import { DEFAULT_FAST_TERMINAL_PAGES, DEFAULT_FULL_MAX_PAGES, scanLimitForMode, 
       resetResults(); status("设置已变化，请重新扫描", true); return;
     }
     if (isDryRun) {
-      status(`Dry Run：${runs.length} 条旧排队 CI 符合候选规则。\n没有向 GitHub 发送取消请求。`);
+      status(`Dry Run：${runs.length} 条旧排队 CI 符合初筛规则（尚未核验 Job）。\n没有发送取消请求。`);
       return;
     }
     switchBusy(true);
