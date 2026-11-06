@@ -6,7 +6,7 @@ Open any `github.com/OWNER/REPO` page and click the browser toolbar button. The 
 
 ## Safety rules
 
-- Only queued runs from the exact workflow/branch are eligible; runs that have started, completed or been cancelled are excluded.
+- Only queued runs from the exact workflow/branch are eligible; runs that have started, completed or been cancelled are excluded. If GitHub omits optional SHA/time fields on terminal runs, these are counted as scanned but excluded from older-run statistics and cancellation selection; incomplete queued runs still stop scanning. The popup reports how many terminal records were skipped.
 - Current HEAD's runs are never selected; the newest older run in the scanned set is protected.
 - Fast mode stops after **N consecutive fully terminal pages** (N defaults to **2**, configurable 1–40), with a GitHub-imposed per-query cap of **1,000 runs / 40 pages**. Full mode scans until the last page or its **maximum scanned pages** limit (default **20**, configurable 1–40). Switching modes retains separate input values. Fast stopping or reaching a cap does not prove complete coverage. On page 40, the scan completes gracefully without requesting inaccessible page 41; already scanned candidates remain visible, with a warning that older records were not scanned. Narrow the query by creation date for older history. Network and parsing errors surface actionable details; incomplete scans keep read-only previews but disable cancellation. Transient 429/5xx failures are retried up to twice with bounded backoff.
 - Branch/head SHA, page-data consistency, run ID, suite, workflow and queued status are checked again before every cancel request. If a run moves pages or changes state, processing stops.
